@@ -412,7 +412,7 @@ jobs:
           do.cleanuponabort=0
           device.name1=dipper
           device.name2=
-          supported.versions=@ANDROID@
+          supported.versions=
           supported.patchlevels=
           supported.vendorpatchlevels=
           '; } # end properties
@@ -429,8 +429,9 @@ jobs:
           flash_boot;
           EOF
           sed -i 's/^          //' AnyKernel3/anykernel.sh
-          # Android version of the target ROM (LineageOS 22.x -> 15, 23.x -> 16, ...)
-          sed -i "s/@ANDROID@/${ANDROID_VERSION}/" AnyKernel3/anykernel.sh
+          # No Android version check (supported.versions empty, like Coconutat's zip):
+          # AnyKernel3 compares it with the *recovery's* Android version, not the ROM's,
+          # so TWRP/OrangeFox builds based on older Android refused the zip.
           sed -i "s/^kernel.string=.*/& (LineageOS ${LINEAGE_VERSION})/" AnyKernel3/anykernel.sh
 
           KREL=$(cat "$KERNEL_DIR/out/include/config/kernel.release" 2>/dev/null)
