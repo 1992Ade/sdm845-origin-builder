@@ -89,9 +89,9 @@ check  ──►  build (susfs)  ──►  release
 2. **build**
    - Clones the selected Coconutat SDM845 kernel branch.
    - Downloads **AOSP Clang r547379**, the toolchain recommended by the kernel's author.
-   - Integrates OriginSU at the exact release tag with its official `setup.sh`, then checks that every SuSFS inline hook OriginSU needs is in the tree.
-   - Generates the config from `vendor/xiaomi/mi845_defconfig` + `extra.config` + `dipper.config`, with `CONFIG_KSU_SUSFS` and the SuSFS features enabled.
-   - Compiles `Image.gz-dtb` and packages it with AnyKernel3 (only the kernel is replaced, the ROM's ramdisk is left alone; the zip only installs on `dipper`).
+   - Integrates OriginSU at the exact release tag with its official `setup.sh` (plus small 4.9 compatibility fixes applied to OriginSU's sources only), then checks that every SuSFS inline hook OriginSU needs is in the tree.
+   - Builds exactly like Coconutat's `build_kernel.sh` (option B = `dipper`): same make commands, same config (`vendor/xiaomi/mi845_defconfig` + `extra.config` + `dipper.config`, which already enable SuSFS), nothing forced on top.
+   - Packages exactly like Coconutat: osm0sis AnyKernel3 + the tree's own `tools/AnyKernel3_sh/anykernel.sh`, with both `Image.gz` and `Image.gz-dtb`. AnyKernel3 flashes `Image.gz` and **keeps the DTB of your ROM's `boot.img`**. Only change: the zip installs on `dipper` only.
 3. **release** — publishes a GitHub Release `originsu-<tag>` with the zip, the config and release notes (OriginSU version, LineageOS version, kernel branch and commit, kernel version, SuSFS version, build date).
 
 ### Schedule
@@ -120,6 +120,7 @@ A manual run for a version that is already released **replaces** that release (u
 |---|---|---|
 | `originsu_ref` | *(latest release)* | OriginSU tag to build |
 | `kernel_branch` | *(latest LineageOS with SuSFS)* | Force a branch of the Coconutat kernel tree (e.g. `lineage-22.2-ReSukiSU`) |
+| `root` | `originsu` | `bakasu` builds the untouched Coconutat kernel (BakaSU) as a **control build**: if it boots and the OriginSU one does not, the problem is OriginSU, not the build. Never published |
 | `kpm` | `false` | Enable `CONFIG_KPM` (experimental on 4.9 kernels) |
 | `publish` | `true` | Publish a GitHub Release (otherwise only build artifacts) |
 
@@ -136,7 +137,7 @@ A manual run for a version that is already released **replaces** that release (u
 | No build although OriginSU released | The release has no manager APK yet; the next weekly run will pick it up (or run manually later) |
 | Build fails on a new LineageOS branch | Run manually with `kernel_branch` set to the previous branch until the new one is fixed upstream |
 | Zip refuses to install ("unsupported device") | The zip is for `dipper` only (no Android version check: make sure yourself that your ROM matches the LineageOS version of the release) |
-| Device stuck on boot logo | Restore the stock `boot.img`, and check that your ROM matches the LineageOS version of the release, with the right firmware |
+| Device stuck on boot logo, or reboots straight to fastboot | Restore the stock `boot.img`. The last kernel log is kept in RAM: boot into TWRP right away and get `/sys/fs/pstore/console-ramoops-0` (e.g. `adb pull /sys/fs/pstore/`), then open an issue with it. Also check that your ROM matches the LineageOS version of the release |
 | Boots, but no Wi-Fi / mobile network / camera | Almost always a module conflict — see [Coming from another root solution?](#️-coming-from-another-root-solution) below |
 | Root gone after a ROM update | Normal: OTA updates replace `boot`. Flash the zip again |
 | No new release after an OriginSU update | Check that the scheduled workflow is still enabled (60-day rule above) |
