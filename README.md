@@ -91,7 +91,7 @@ check  ──►  build (susfs)  ──►  release
    - Downloads **AOSP Clang r547379**, the toolchain recommended by the kernel's author.
    - Integrates OriginSU at the exact release tag with its official `setup.sh`, then checks that every SuSFS inline hook OriginSU needs is in the tree.
    - Generates the config from `vendor/xiaomi/mi845_defconfig` + `extra.config` + `dipper.config`, with `CONFIG_KSU_SUSFS` and the SuSFS features enabled.
-   - Compiles `Image.gz-dtb` and packages it with AnyKernel3 (only the kernel is replaced, the ROM's ramdisk is left alone; the zip only accepts the matching Android version).
+   - Compiles `Image.gz-dtb` and packages it with AnyKernel3 (only the kernel is replaced, the ROM's ramdisk is left alone; the zip only installs on `dipper`).
 3. **release** — publishes a GitHub Release `originsu-<tag>` with the zip, the config and release notes (OriginSU version, LineageOS version, kernel branch and commit, kernel version, SuSFS version, build date).
 
 ### Schedule
@@ -135,7 +135,7 @@ A manual run for a version that is already released **replaces** that release (u
 | *check* fails with "No LineageOS branch with SuSFS found" | The Coconutat tree changed its branch layout — run manually with `kernel_branch` set |
 | No build although OriginSU released | The release has no manager APK yet; the next weekly run will pick it up (or run manually later) |
 | Build fails on a new LineageOS branch | Run manually with `kernel_branch` set to the previous branch until the new one is fixed upstream |
-| Zip refuses to install ("unsupported device" / "unsupported version") | The zip is for `dipper` only, and for the Android version of the LineageOS release it was built for |
+| Zip refuses to install ("unsupported device") | The zip is for `dipper` only (no Android version check: make sure yourself that your ROM matches the LineageOS version of the release) |
 | Device stuck on boot logo | Restore the stock `boot.img`, and check that your ROM matches the LineageOS version of the release, with the right firmware |
 | Boots, but no Wi-Fi / mobile network / camera | Almost always a module conflict — see [Coming from another root solution?](#️-coming-from-another-root-solution) below |
 | Root gone after a ROM update | Normal: OTA updates replace `boot`. Flash the zip again |
