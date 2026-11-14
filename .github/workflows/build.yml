@@ -1,0 +1,420 @@
+name: Build Xiaomi Mi 8 (dipper) Kernel with OriginSU
+
+# Basé sur le kernel SDM845 4.9 de Coconutat (android_kernel_xiaomi_sdm845_lineageos_Exp),
+# qui intègre déjà SuSFS v2.x et les hooks inline SuSFS. La branche utilisée est choisie
+# automatiquement : la version LineageOS la plus récente dont la branche contient SuSFS
+# (aujourd'hui lineage-22.2-BakaSU).
+# BakaSU (récupéré par sync_ksu.sh, absent du tree) est remplacé par OriginSU.
+
+on:
+  # Vérifie chaque dimanche (05:37 UTC) si une nouvelle release OriginSU est sortie
+  schedule:
+    - cron: "37 5 * * 0"
+  workflow_dispatch:
+    inputs:
+      originsu_ref:
+        description: "Tag OriginSU à compiler (vide = dernière release)"
+        required: false
+        default: ""
+      kernel_branch:
+        description: "Branche du kernel Coconutat (vide = LineageOS la plus récente avec SuSFS)"
+        required: false
+        default: ""
+      kpm:
+        description: "Activer CONFIG_KPM (expérimental sur 4.9)"
+        type: boolean
+        default: false
+      publish:
+        description: "Publier une release GitHub"
+        type: boolean
+        default: true
+
+concurrency:
+  group: kernel-build
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  KERNEL_REPO: Coconutat/android_kernel_xiaomi_sdm845_lineageos_Exp
+  KERNEL_DIR: android_kernel_xiaomi_sdm845
+  DEVICE: dipper
+  # Toolchain utilisée par Coconutat (voir README du kernel)
+  CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android16-release/clang-r547379.tar.gz
+  KBUILD_BUILD_USER: builder
+  KBUILD_BUILD_HOST: github-actions
+  MAKE_ARGS: ARCH=arm64 SUBARCH=arm64 CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+
+jobs:
+  # ------------------------------------------------------------------
+  # 1) Faut-il compiler ? (nouvelle version OriginSU non encore publiée)
+  # ------------------------------------------------------------------
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
+      branch: ${{ steps.branch.outputs.branch }}
+      lineage: ${{ steps.branch.outputs.lineage }}
+      android: ${{ steps.branch.outputs.android }}
+      build: ${{ steps.decide.outputs.build }}
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Latest OriginSU release (with its manager APK)
+        id: ver
+        run: |
+          TAG="${{ inputs.originsu_ref }}"
+          if [ -z "$TAG" ]; then
+            # Dernière release stable (gh ignore les pre-releases)
+            TAG=$(gh release view --repo samakshkambxj/OriginSU --json tagName -q .tagName 2>/dev/null || true)
+          fi
+          [ -n "$TAG" ] || { echo "::error::Impossible de déterminer la version OriginSU"; exit 1; }
+
+          # On ne compile que si le manager correspondant est publié dans la release
+          APKS=$(gh release view "$TAG" --repo samakshkambxj/OriginSU --json assets -q '.assets[].name' 2>/dev/null | grep -E '\.apk$' || true)
+          if [ -z "$APKS" ]; then
+            echo "::warning::La release OriginSU $TAG ne contient pas (encore) l'APK du manager -> pas de build"
+            echo "manager=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Manager disponible :"; echo "$APKS" | sed 's/^/  /'
+            echo "manager=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "OriginSU version : $TAG"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Pick the most recent LineageOS kernel branch with SuSFS
+        id: branch
+        run: |
+          R="$KERNEL_REPO"
+          pick() {
+            echo "branch=$1" >> "$GITHUB_OUTPUT"
+            V=$(echo "$1" | sed -nE 's/^lineage-([0-9]+(\.[0-9]+)?).*/\1/p')
+            [ -n "$V" ] || { echo "::error::Nom de branche inattendu : $1 (attendu lineage-<version>...)"; exit 1; }
+            echo "lineage=$V" >> "$GITHUB_OUTPUT"
+            # LineageOS N = Android N-7 (21 -> 14, 22 -> 15, 23 -> 16)
+            echo "android=$(( ${V%%.*} - 7 ))" >> "$GITHUB_OUTPUT"
+            echo "Branche kernel retenue : $1 (LineageOS $V)"
+          }
+
+          if [ -n "${{ inputs.kernel_branch }}" ]; then
+            pick "${{ inputs.kernel_branch }}"; exit 0
+          fi
+
+          # Branches lineage-<version>[-suffixe] (ex. lineage-22.2-BakaSU, lineage-23.0-...)
+          BR=$(gh api --paginate "repos/$R/branches?per_page=100" -q '.[].name' \
+               | grep -E '^lineage-[0-9]+(\.[0-9]+)?(-[A-Za-z0-9._-]+)?$')
+          VERS=$(echo "$BR" | sed -E 's/^lineage-([0-9]+(\.[0-9]+)?).*/\1/' | sort -uVr)
+          echo "Versions LineageOS disponibles : $(echo $VERS)"
+
+          for v in $VERS; do
+            ve=${v//./\\.}
+            # Pour une même version : la branche la plus récemment mise à jour d'abord
+            CANDS=$(for b in $(echo "$BR" | grep -E "^lineage-${ve}(-|$)"); do
+                      echo "$(gh api "repos/$R/commits/$b" -q .commit.committer.date) $b"
+                    done | sort -r | cut -d' ' -f2)
+            for b in $CANDS; do
+              ok=1
+              # Il faut SuSFS + ses hooks + les configs dipper utilisées par le build
+              for f in fs/susfs.c include/linux/susfs.h \
+                       arch/arm64/configs/vendor/xiaomi/mi845_defconfig \
+                       arch/arm64/configs/vendor/xiaomi/extra.config \
+                       arch/arm64/configs/vendor/xiaomi/dipper.config; do
+                gh api "repos/$R/contents/$f?ref=$b" -q .name >/dev/null 2>&1 || { echo "  $b : $f absent"; ok=0; break; }
+              done
+              if [ $ok = 1 ] && ! curl -fsSL "https://raw.githubusercontent.com/$R/$b/fs/exec.c" | grep -q 'ksu_handle_execveat'; then
+                echo "  $b : hooks SuSFS absents"; ok=0
+              fi
+              if [ $ok = 1 ]; then pick "$b"; exit 0; fi
+            done
+          done
+          echo "::error::Aucune branche LineageOS avec SuSFS trouvée dans $R"; exit 1
+
+      - name: Decide whether to build
+        id: decide
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+          BRANCH: ${{ steps.branch.outputs.branch }}
+        run: |
+          if [ "${{ steps.ver.outputs.manager }}" != "true" ]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Lancement manuel -> build forcé"
+            echo "build=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          BODY=$(gh release view "originsu-$TAG" --repo "$GITHUB_REPOSITORY" --json body -q .body 2>/dev/null || true)
+          if [ -z "$BODY" ]; then
+            echo "Nouvelle version OriginSU $TAG -> build"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          elif ! grep -qF "\`$BRANCH\`" <<<"$BODY"; then
+            echo "Release originsu-$TAG construite sur une autre branche -> rebuild sur $BRANCH"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "originsu-$TAG déjà publiée sur $BRANCH -> rien à faire"
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ------------------------------------------------------------------
+  # 2) Compilation (SuSFS inline hook, déjà présent dans le tree)
+  # ------------------------------------------------------------------
+  build:
+    needs: check
+    if: needs.check.outputs.build == 'true'
+    runs-on: ubuntu-latest
+    env:
+      ORIGINSU_TAG: ${{ needs.check.outputs.tag }}
+      KERNEL_BRANCH: ${{ needs.check.outputs.branch }}
+      LINEAGE_VERSION: ${{ needs.check.outputs.lineage }}
+      ANDROID_VERSION: ${{ needs.check.outputs.android }}
+      KPM: ${{ github.event_name == 'workflow_dispatch' && inputs.kpm || 'false' }}
+
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc build-essential bison flex zip curl git wget \
+            libssl-dev libelf-dev zstd python3 python-is-python3 cpio unzip \
+            binutils-aarch64-linux-gnu gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+
+      - name: Clone kernel
+        run: |
+          git clone --depth=1 -b "$KERNEL_BRANCH" "https://github.com/${KERNEL_REPO}.git" "$KERNEL_DIR"
+          echo "KERNEL_COMMIT=$(git -C "$KERNEL_DIR" rev-parse --short HEAD)" >> "$GITHUB_ENV"
+
+      - name: Download AOSP Clang r547379
+        run: |
+          mkdir -p "$HOME/clang"
+          curl -fL --retry 5 --retry-all-errors -o /tmp/clang.tar.gz "$CLANG_URL"
+          tar -C "$HOME/clang" -xzf /tmp/clang.tar.gz
+          rm -f /tmp/clang.tar.gz
+          echo "$HOME/clang/bin" >> "$GITHUB_PATH"
+          "$HOME/clang/bin/clang" --version | head -n1
+
+      - name: Prepare tree
+        working-directory: ${{ env.KERNEL_DIR }}
+        run: |
+          # Pas de suffixe "-dirty" dans la version
+          sed -i "s/printf '%s' -dirty/:/g" scripts/setlocalversion
+          # Au cas où un ancien KernelSU traînerait dans le tree
+          rm -rf KernelSU drivers/kernelsu
+
+      - name: Integrate OriginSU
+        working-directory: ${{ env.KERNEL_DIR }}
+        run: |
+          # 1) Setup OriginSU (clone dans ./KernelSU + lien drivers/kernelsu)
+          curl -LSs --fail --retry 3 https://raw.githubusercontent.com/samakshkambxj/OriginSU/main/kernel/setup.sh \
+            | bash -s "$ORIGINSU_TAG"
+          [ -e drivers/kernelsu/Kconfig ] || { echo "::error::drivers/kernelsu absent après setup.sh"; exit 1; }
+
+          # 1b) Correctif non-GKI (anciennes versions OriginSU) : preinit.h inclus sans condition
+          F=KernelSU/kernel/runtime/ksud_integration.c
+          if [ -f "$F" ] && grep -q 'ksu_preinit_release' "$F" && \
+             ! sed -n '1,/^#if defined(CONFIG_KSU_TRACEPOINT_HOOK)/p' "$F" | grep -q '^#include "preinit/preinit.h"'; then
+            sed -i '0,/^#if defined(CONFIG_KSU_TRACEPOINT_HOOK)/s//#include "preinit\/preinit.h" \/\/ fix non-GKI link\n&/' "$F"
+            echo "-> preinit.h inclus sans condition dans $F"
+          fi
+
+          # 2) Les hooks SuSFS doivent être présents (OriginSU les vérifie aussi au build)
+          for p in "kernel/sys.c:ksu_handle_setresuid" "fs/exec.c:ksu_handle_execveat" \
+                   "fs/open.c:ksu_handle_faccessat" "fs/read_write.c:ksu_handle_sys_read" \
+                   "fs/stat.c:ksu_handle_stat" "kernel/reboot.c:ksu_handle_sys_reboot" \
+                   "drivers/input/input.c:ksu_handle_input_handle_event"; do
+            grep -q "${p#*:}" "${p%%:*}" && echo "  hook ok: ${p#*:}" \
+              || { echo "::error::hook ${p#*:} absent de ${p%%:*}"; exit 1; }
+          done
+          [ -f fs/susfs.c ] || { echo "::error::SuSFS absent du tree"; exit 1; }
+          echo "SuSFS du tree : $(grep -m1 SUSFS_VERSION include/linux/susfs.h)"
+
+          # 3) Exporter les symboles SELinux statiques (requis par OriginSU si KALLSYMS_ALL est désactivé)
+          unstatic() { [ -f "$1" ] && grep -q "static $2" "$1" && sed -i "s/static $2/$2/" "$1" && echo "  exported: $2" || true; }
+          unstatic security/selinux/selinuxfs.c   'ssize_t (\*write_op\[\])'
+          unstatic security/selinux/selinuxfs.c   'const struct file_operations sel_handle_status_ops'
+          unstatic security/selinux/selinuxfs.c   'DEFINE_MUTEX(sel_mutex);'
+          unstatic security/selinux/ss/status.c   'struct page \*selinux_status_page;'
+          unstatic security/selinux/ss/status.c   'DEFINE_MUTEX(selinux_status_lock);'
+          unstatic security/selinux/ss/services.c 'DEFINE_RWLOCK(policy_rwlock);'
+          unstatic security/selinux/ss/services.c 'void security_dump_masked_av'
+          unstatic security/selinux/ss/services.c 'void context_struct_compute_av'
+
+          sed -i 's/\$(KSU_COMMIT_SHA)-dirty/$(KSU_COMMIT_SHA)/' KernelSU/kernel/Kbuild 2>/dev/null || true
+
+      - name: Generate kernel config
+        working-directory: ${{ env.KERNEL_DIR }}
+        run: |
+          # Même combinaison que build_kernel.sh de Coconutat (option B = dipper)
+          export CONFIG_BUILD_ARM64_DT_OVERLAY=y
+          make O=out $MAKE_ARGS vendor/xiaomi/mi845_defconfig vendor/xiaomi/extra.config vendor/xiaomi/${DEVICE}.config
+
+          # Configs OriginSU (extra.config active déjà KSU + SuSFS, on force pour être sûr)
+          ./scripts/config --file out/.config \
+            -e KSU -e KSU_MULTI_MANAGER_SUPPORT -e KSU_SUSFS \
+            -d KSU_MANUAL_HOOK -d KSU_TRACEPOINT_HOOK -d KSU_DEBUG \
+            -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT -e KSU_SUSFS_SUS_KSTAT \
+            -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+            -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG -e KSU_SUSFS_OPEN_REDIRECT \
+            -e KSU_SUSFS_SUS_MAP -d KSU_SUSFS_ENABLE_LOG \
+            -d CC_WERROR -d LOCALVERSION_AUTO
+          if [ "$KPM" = "true" ]; then
+            ./scripts/config --file out/.config -e KPM
+          else
+            ./scripts/config --file out/.config -d KPM
+          fi
+          make O=out $MAKE_ARGS olddefconfig
+
+          echo "--- OriginSU configs effectives ---"
+          grep -E '^(CONFIG_KSU|CONFIG_KPM|# CONFIG_KSU_MANUAL)' out/.config || true
+          grep -q '^CONFIG_KSU_SUSFS=y' out/.config || { echo "::error::CONFIG_KSU_SUSFS non actif"; exit 1; }
+
+      - name: Compile the kernel
+        working-directory: ${{ env.KERNEL_DIR }}
+        run: |
+          export CONFIG_BUILD_ARM64_DT_OVERLAY=y
+          set +e
+          make -j"$(nproc --all)" O=out $MAKE_ARGS 2>&1 | tee build.log
+          RC=${PIPESTATUS[0]}
+          set -e
+
+          echo "--- Messages OriginSU ---"
+          grep -E -- '-- (OriginSU|KernelSU|KPM|SUSFS|You )' build.log | sort -u || true
+          echo "--- Contenu de out/arch/arm64/boot ---"
+          ls -la out/arch/arm64/boot/ 2>/dev/null || echo "(dossier absent)"
+
+          if [ "$RC" -ne 0 ]; then
+            echo "::error::La compilation a échoué (make code $RC). Premières erreurs :"
+            grep -nE "error:|Error [0-9]|undefined reference|\*\*\*" build.log | head -n 40 || true
+            exit "$RC"
+          fi
+          [ -f out/arch/arm64/boot/Image.gz-dtb ] || { echo "::error::Compilation OK mais pas d'Image.gz-dtb."; exit 1; }
+
+      - name: Upload build log (même en cas d'échec)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: |
+            ${{ env.KERNEL_DIR }}/build.log
+            ${{ env.KERNEL_DIR }}/out/.config
+          if-no-files-found: ignore
+
+      - name: Package with AnyKernel3
+        run: |
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 AnyKernel3
+          rm -rf AnyKernel3/.git AnyKernel3/.github AnyKernel3/README.md AnyKernel3/modules AnyKernel3/patch AnyKernel3/ramdisk
+          cp "$KERNEL_DIR/out/arch/arm64/boot/Image.gz-dtb" AnyKernel3/
+
+          # Script AnyKernel3 : dipper uniquement, on remplace seulement le kernel (ramdisk intact)
+          cat > AnyKernel3/anykernel.sh <<'EOF'
+          ### AnyKernel3 Ramdisk Mod Script
+          ## osm0sis @ xda-developers
+
+          properties() { '
+          kernel.string=Xiaomi Mi 8 (dipper) OriginSU kernel - based on Coconutat SDM845 LineageOS kernel
+          do.devicecheck=1
+          do.modules=0
+          do.systemless=1
+          do.cleanup=1
+          do.cleanuponabort=0
+          device.name1=dipper
+          device.name2=
+          supported.versions=@ANDROID@
+          supported.patchlevels=
+          supported.vendorpatchlevels=
+          '; } # end properties
+
+          BLOCK=auto;
+          IS_SLOT_DEVICE=auto;
+          RAMDISK_COMPRESSION=auto;
+          PATCH_VBMETA_FLAG=auto;
+          no_magisk_check=1;
+
+          . tools/ak3-core.sh;
+
+          split_boot;
+          flash_boot;
+          EOF
+          sed -i 's/^          //' AnyKernel3/anykernel.sh
+          # Version Android de la ROM ciblée (LineageOS 22.x -> 15, 23.x -> 16, ...)
+          sed -i "s/@ANDROID@/${ANDROID_VERSION}/" AnyKernel3/anykernel.sh
+          sed -i "s/^kernel.string=.*/& (LineageOS ${LINEAGE_VERSION})/" AnyKernel3/anykernel.sh
+
+          KREL=$(cat "$KERNEL_DIR/out/include/config/kernel.release" 2>/dev/null)
+          ZIP="Mi8-dipper-LOS${LINEAGE_VERSION}-OriginSU-${ORIGINSU_TAG}-susfs-$(date +%Y%m%d).zip"
+          (cd AnyKernel3 && zip -rq9 "../$ZIP" ./*)
+          mkdir -p dist
+          mv "$ZIP" dist/
+          cp "$KERNEL_DIR/out/.config" dist/config-dipper.txt
+          cp "$KERNEL_DIR/build.log"   dist/build-dipper.log
+          echo "KERNEL_COMMIT=$KERNEL_COMMIT" > dist/info.txt
+          echo "KERNEL_RELEASE=$KREL" >> dist/info.txt
+          echo "SUSFS_VERSION=$(grep -m1 SUSFS_VERSION "$KERNEL_DIR/include/linux/susfs.h" | cut -d'"' -f2)" >> dist/info.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mi8-dipper-OriginSU
+          path: dist/*
+
+  # ------------------------------------------------------------------
+  # 3) Publication de la release GitHub
+  # ------------------------------------------------------------------
+  release:
+    needs: [check, build]
+    if: >-
+      needs.check.outputs.build == 'true' && needs.build.result == 'success' &&
+      (github.event_name == 'schedule' || inputs.publish)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: originsu-${{ needs.check.outputs.tag }}
+      ORIGINSU_TAG: ${{ needs.check.outputs.tag }}
+      KERNEL_BRANCH: ${{ needs.check.outputs.branch }}
+      LINEAGE_VERSION: ${{ needs.check.outputs.lineage }}
+      ANDROID_VERSION: ${{ needs.check.outputs.android }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Mi8-dipper-OriginSU
+          path: dist
+
+      - name: Write release notes
+        run: |
+          source dist/info.txt
+          cat > notes.md <<EOF
+          ## Xiaomi Mi 8 (dipper) kernel — OriginSU \`${ORIGINSU_TAG}\`
+
+          | | |
+          |---|---|
+          | OriginSU | [${ORIGINSU_TAG}](https://github.com/samakshkambxj/OriginSU/releases/tag/${ORIGINSU_TAG}) (kernel + manager) |
+          | ROM | LineageOS ${LINEAGE_VERSION} (Android ${ANDROID_VERSION}) and /e/OS based on it |
+          | Kernel | Coconutat SDM845 \`${KERNEL_BRANCH}\` @ [\`${KERNEL_COMMIT}\`](https://github.com/${KERNEL_REPO}/commit/${KERNEL_COMMIT}) |
+          | Kernel version | \`${KERNEL_RELEASE}\` |
+          | SuSFS | \`${SUSFS_VERSION}\` (inline hook) |
+          | Build date | $(date -u +%Y-%m-%d) |
+
+          For **LineageOS ${LINEAGE_VERSION}** and **/e/OS (Android ${ANDROID_VERSION})** on the Xiaomi Mi 8 (\`dipper\`) only.
+
+          Flash from TWRP / OrangeFox, then install the OriginSU manager from the
+          [OriginSU release page](https://github.com/samakshkambxj/OriginSU/releases/tag/${ORIGINSU_TAG}).
+          **Back up your stock \`boot\` partition first.**
+          EOF
+          sed -i 's/^          //' notes.md
+
+      - name: Create (or replace) the release
+        run: |
+          gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag -y 2>/dev/null || true
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --title "Mi 8 (dipper) LineageOS ${LINEAGE_VERSION} — OriginSU ${ORIGINSU_TAG}" \
+            --notes-file notes.md --latest \
+            dist/*.zip dist/config-*.txt
