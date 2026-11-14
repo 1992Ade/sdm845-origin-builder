@@ -235,6 +235,22 @@ jobs:
             fi
           done
 
+          # 1d) 4.9 fix: <linux/sched/{signal,task,task_stack,mm,user}.h> only exist since 4.11.
+          #     On 4.9 everything they declare is still in <linux/sched.h>.
+          #     Without it: "fatal error: 'linux/sched/signal.h' file not found"
+          #     (e.g. infra/symbol_resolver.c). Only headers missing from the tree are rewritten.
+          grep -rhoE '#[[:space:]]*include[[:space:]]*<linux/sched/[a-z_]+\.h>' \
+               --include='*.c' --include='*.h' KernelSU/kernel \
+            | sed -E 's/.*<(linux\/sched\/[a-z_]+\.h)>/\1/' | sort -u | while read -r h; do
+            if [ ! -e "include/$h" ]; then
+              grep -rlE "#[[:space:]]*include[[:space:]]*<${h//\//\\/}>" --include='*.c' --include='*.h' KernelSU/kernel \
+                | while read -r f; do
+                sed -i -E "s|#([[:space:]]*)include([[:space:]]*)<${h}>|#\1include\2<linux/sched.h> /* fix 4.9: ${h} */|" "$f"
+                echo "-> <$h> replaced by <linux/sched.h> in $f"
+              done
+            fi
+          done
+
           # 2) The SuSFS hooks must be present (OriginSU also checks them at build time)
           for p in "kernel/sys.c:ksu_handle_setresuid" "fs/exec.c:ksu_handle_execveat" \
                    "fs/open.c:ksu_handle_faccessat" "fs/read_write.c:ksu_handle_sys_read" \
