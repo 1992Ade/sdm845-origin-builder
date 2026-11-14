@@ -5,6 +5,8 @@ name: Build Xiaomi Mi 8 (dipper) Kernel with OriginSU
 # automatically: the most recent LineageOS version whose branch contains SuSFS
 # (currently lineage-22.2-BakaSU).
 # BakaSU (fetched by sync_ksu.sh, not part of the tree) is replaced by OriginSU.
+# Build and packaging follow Coconutat's build_kernel.sh / sync_anykernel3.sh exactly;
+# a manual "bakasu" run builds the untouched Coconutat kernel as a control.
 
 on:
   # Checks every Sunday (05:37 UTC) whether a new OriginSU release is out
@@ -20,6 +22,11 @@ on:
         description: "Coconutat kernel branch (empty = latest LineageOS with SuSFS)"
         required: false
         default: ""
+      root:
+        description: "Root solution (bakasu = control build identical to Coconutat's, never published)"
+        type: choice
+        options: [originsu, bakasu]
+        default: originsu
       kpm:
         description: "Enable CONFIG_KPM (experimental on 4.9)"
         type: boolean
@@ -48,7 +55,6 @@ env:
   CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android16-release/clang-r547379.tar.gz
   KBUILD_BUILD_USER: builder
   KBUILD_BUILD_HOST: github-actions
-  MAKE_ARGS: ARCH=arm64 SUBARCH=arm64 CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi-
 
 jobs:
   # ------------------------------------------------------------------
@@ -160,7 +166,8 @@ jobs:
           fi
 
   # ------------------------------------------------------------------
-  # 2) Build (SuSFS inline hook, already in the tree)
+  # 2) Build — same steps as Coconutat's build_kernel.sh (option B = dipper)
+  #    and same AnyKernel3 packaging; only the root solution differs.
   # ------------------------------------------------------------------
   build:
     needs: check
@@ -171,7 +178,19 @@ jobs:
       KERNEL_BRANCH: ${{ needs.check.outputs.branch }}
       LINEAGE_VERSION: ${{ needs.check.outputs.lineage }}
       ANDROID_VERSION: ${{ needs.check.outputs.android }}
+      ROOT: ${{ github.event_name == 'workflow_dispatch' && inputs.root || 'originsu' }}
       KPM: ${{ github.event_name == 'workflow_dispatch' && inputs.kpm || 'false' }}
+      # Environment exported by build_kernel.sh
+      ARCH: arm64
+      SUBARCH: arm64
+      CC: clang
+      LD: ld.lld
+      LLVM: "1"
+      LLVM_IAS: "1"
+      CLANG_TRIPLE: aarch64-linux-gnu-
+      CROSS_COMPILE: aarch64-linux-gnu-
+      CROSS_COMPILE_ARM32: arm-linux-gnueabi-
+      CONFIG_BUILD_ARM64_DT_OVERLAY: "y"
 
     steps:
       - name: Free disk space
@@ -200,21 +219,25 @@ jobs:
           echo "$HOME/clang/bin" >> "$GITHUB_PATH"
           "$HOME/clang/bin/clang" --version | head -n1
 
-      - name: Prepare tree
+      - name: Install the root solution (${{ env.ROOT }})
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
-          # No "-dirty" suffix in the version string
-          sed -i "s/printf '%s' -dirty/:/g" scripts/setlocalversion
-          # In case an old KernelSU is left in the tree
+          # Same as Coconutat's sync_ksu.sh: start from a clean KernelSU folder
           rm -rf KernelSU drivers/kernelsu
 
-      - name: Integrate OriginSU
-        working-directory: ${{ env.KERNEL_DIR }}
-        run: |
-          # 1) Set up OriginSU (clone into ./KernelSU + drivers/kernelsu symlink)
-          curl -LSs --fail --retry 3 https://raw.githubusercontent.com/samakshkambxj/OriginSU/main/kernel/setup.sh \
+          if [ "$ROOT" = "bakasu" ]; then
+            # Control build: exactly what Coconutat ships (sync_ksu.sh option E), no change at all
+            curl -fLSs https://raw.githubusercontent.com/Baka-SU/BakaSU/main/kernel/setup.sh | bash
+            [ -e drivers/kernelsu/Kconfig ] || { echo "::error::drivers/kernelsu missing after setup.sh"; exit 1; }
+            exit 0
+          fi
+
+          # OriginSU (clone into ./KernelSU + drivers/kernelsu symlink)
+          curl -fLSs --retry 3 https://raw.githubusercontent.com/samakshkambxj/OriginSU/main/kernel/setup.sh \
             | bash -s "$ORIGINSU_TAG"
           [ -e drivers/kernelsu/Kconfig ] || { echo "::error::drivers/kernelsu missing after setup.sh"; exit 1; }
+
+          # --- 4.9 compatibility fixes, applied to OriginSU's sources only (kernel tree untouched) ---
 
           # 1b) Non-GKI fix (older OriginSU versions): include preinit.h unconditionally
           F=KernelSU/kernel/runtime/ksud_integration.c
@@ -310,7 +333,7 @@ jobs:
           echo "ccflags-y += -include $COMPAT" >> KernelSU/kernel/Kbuild
           echo "--- $COMPAT ---"; cat "$COMPAT"
 
-          # 2) The SuSFS hooks must be present (OriginSU also checks them at build time)
+          # The SuSFS inline hooks must be present (OriginSU also checks them at build time)
           for p in "kernel/sys.c:ksu_handle_setresuid" "fs/exec.c:ksu_handle_execveat" \
                    "fs/open.c:ksu_handle_faccessat" "fs/read_write.c:ksu_handle_sys_read" \
                    "fs/stat.c:ksu_handle_stat" "kernel/reboot.c:ksu_handle_sys_reboot" \
@@ -320,58 +343,38 @@ jobs:
           done
           [ -f fs/susfs.c ] || { echo "::error::SuSFS missing from the tree"; exit 1; }
           echo "Tree SuSFS: $(grep -m1 SUSFS_VERSION include/linux/susfs.h)"
-
-          # 3) Export static SELinux symbols (required by OriginSU when KALLSYMS_ALL is disabled)
-          unstatic() { [ -f "$1" ] && grep -q "static $2" "$1" && sed -i "s/static $2/$2/" "$1" && echo "  exported: $2" || true; }
-          unstatic security/selinux/selinuxfs.c   'ssize_t (\*write_op\[\])'
-          unstatic security/selinux/selinuxfs.c   'const struct file_operations sel_handle_status_ops'
-          unstatic security/selinux/selinuxfs.c   'DEFINE_MUTEX(sel_mutex);'
-          unstatic security/selinux/ss/status.c   'struct page \*selinux_status_page;'
-          unstatic security/selinux/ss/status.c   'DEFINE_MUTEX(selinux_status_lock);'
-          unstatic security/selinux/ss/services.c 'DEFINE_RWLOCK(policy_rwlock);'
-          unstatic security/selinux/ss/services.c 'void security_dump_masked_av'
-          unstatic security/selinux/ss/services.c 'void context_struct_compute_av'
-
           sed -i 's/\$(KSU_COMMIT_SHA)-dirty/$(KSU_COMMIT_SHA)/' KernelSU/kernel/Kbuild 2>/dev/null || true
 
       - name: Generate kernel config
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
-          # Same combination as Coconutat's build_kernel.sh (option B = dipper)
-          export CONFIG_BUILD_ARM64_DT_OVERLAY=y
-          make O=out $MAKE_ARGS vendor/xiaomi/mi845_defconfig vendor/xiaomi/extra.config vendor/xiaomi/${DEVICE}.config
+          mkdir -p out
+          # Same command as build_kernel.sh (option B = dipper). The tree's extra.config
+          # already enables KSU + SuSFS inline hook + all SuSFS features.
+          make ARCH=arm64 O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 \
+            vendor/xiaomi/mi845_defconfig vendor/xiaomi/extra.config vendor/xiaomi/${DEVICE}.config
 
-          # OriginSU configs (extra.config already enables KSU + SuSFS, forced here to be safe)
-          ./scripts/config --file out/.config \
-            -e KSU -e KSU_MULTI_MANAGER_SUPPORT -e KSU_SUSFS \
-            -d KSU_MANUAL_HOOK -d KSU_TRACEPOINT_HOOK -d KSU_DEBUG \
-            -e KSU_SUSFS_SUS_PATH -e KSU_SUSFS_SUS_MOUNT -e KSU_SUSFS_SUS_KSTAT \
-            -e KSU_SUSFS_SPOOF_UNAME -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
-            -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG -e KSU_SUSFS_OPEN_REDIRECT \
-            -e KSU_SUSFS_SUS_MAP -d KSU_SUSFS_ENABLE_LOG \
-            -d CC_WERROR -d LOCALVERSION_AUTO
+          # Only change: KPM, if asked for (manual runs)
           if [ "$KPM" = "true" ]; then
             ./scripts/config --file out/.config -e KPM
-          else
-            ./scripts/config --file out/.config -d KPM
+            make ARCH=arm64 O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 olddefconfig
           fi
-          make O=out $MAKE_ARGS olddefconfig
 
-          echo "--- Effective OriginSU configs ---"
-          grep -E '^(CONFIG_KSU|CONFIG_KPM|# CONFIG_KSU_MANUAL)' out/.config || true
+          echo "--- Effective KernelSU configs ---"
+          grep -E '^(CONFIG_KSU|CONFIG_KPM)' out/.config || true
           grep -q '^CONFIG_KSU_SUSFS=y' out/.config || { echo "::error::CONFIG_KSU_SUSFS is not enabled"; exit 1; }
 
       - name: Compile the kernel
         working-directory: ${{ env.KERNEL_DIR }}
         run: |
-          export CONFIG_BUILD_ARM64_DT_OVERLAY=y
           set +e
-          make -j"$(nproc --all)" O=out $MAKE_ARGS 2>&1 | tee build.log
+          # Same command as build_kernel.sh
+          make ARCH=arm64 O=out CC=clang LD=ld.lld LLVM=1 LLVM_IAS=1 -j"$(nproc --all)" 2>&1 | tee build.log
           RC=${PIPESTATUS[0]}
           set -e
 
-          echo "--- OriginSU messages ---"
-          grep -E -- '-- (OriginSU|KernelSU|KPM|SUSFS|You )' build.log | sort -u || true
+          echo "--- KernelSU messages ---"
+          grep -E -- '-- (OriginSU|BakaSU|KernelSU|KPM|SUSFS|You )' build.log | sort -u || true
           echo "--- Contents of out/arch/arm64/boot ---"
           ls -la out/arch/arm64/boot/ 2>/dev/null || echo "(directory missing)"
 
@@ -380,62 +383,49 @@ jobs:
             grep -nE "error:|Error [0-9]|undefined reference|\*\*\*" build.log | head -n 40 || true
             exit "$RC"
           fi
-          [ -f out/arch/arm64/boot/Image.gz-dtb ] || { echo "::error::Build succeeded but no Image.gz-dtb was produced."; exit 1; }
+          for f in Image.gz Image.gz-dtb; do
+            [ -f "out/arch/arm64/boot/$f" ] || { echo "::error::Build succeeded but no $f was produced."; exit 1; }
+          done
 
       - name: Upload build log (even on failure)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-log
+          name: build-log-${{ env.ROOT }}
           path: |
             ${{ env.KERNEL_DIR }}/build.log
             ${{ env.KERNEL_DIR }}/out/.config
           if-no-files-found: ignore
 
-      - name: Package with AnyKernel3
+      - name: Package with AnyKernel3 (same as Coconutat)
         run: |
+          # Same as sync_anykernel3.sh + build_kernel.sh: osm0sis AnyKernel3 + the tree's
+          # tools/AnyKernel3_sh/anykernel.sh, with BOTH Image.gz and Image.gz-dtb.
+          # AnyKernel3 flashes the first one it finds, i.e. Image.gz, and keeps the DTB
+          # already in the ROM's boot.img. Flashing our Image.gz-dtb instead replaced
+          # that DTB, and the bootloader dropped to fastboot.
           git clone --depth=1 https://github.com/osm0sis/AnyKernel3 AnyKernel3
-          rm -rf AnyKernel3/.git AnyKernel3/.github AnyKernel3/README.md AnyKernel3/modules AnyKernel3/patch AnyKernel3/ramdisk
-          cp "$KERNEL_DIR/out/arch/arm64/boot/Image.gz-dtb" AnyKernel3/
+          rm -rf AnyKernel3/.git AnyKernel3/.github
+          cp "$KERNEL_DIR/out/arch/arm64/boot/Image.gz"     AnyKernel3/Image.gz
+          cp "$KERNEL_DIR/out/arch/arm64/boot/Image.gz-dtb" AnyKernel3/Image.gz-dtb
+          cp -f "$KERNEL_DIR/tools/AnyKernel3_sh/anykernel.sh" AnyKernel3/anykernel.sh
 
-          # AnyKernel3 script: dipper only, replaces the kernel only (ramdisk untouched)
-          cat > AnyKernel3/anykernel.sh <<'EOF'
-          ### AnyKernel3 Ramdisk Mod Script
-          ## osm0sis @ xda-developers
-
-          properties() { '
-          kernel.string=Xiaomi Mi 8 (dipper) OriginSU kernel - based on Coconutat SDM845 LineageOS kernel
-          do.devicecheck=1
-          do.modules=0
-          do.systemless=1
-          do.cleanup=1
-          do.cleanuponabort=0
-          device.name1=dipper
-          device.name2=
-          supported.versions=
-          supported.patchlevels=
-          supported.vendorpatchlevels=
-          '; } # end properties
-
-          BLOCK=auto;
-          IS_SLOT_DEVICE=auto;
-          RAMDISK_COMPRESSION=auto;
-          PATCH_VBMETA_FLAG=auto;
-          no_magisk_check=1;
-
-          . tools/ak3-core.sh;
-
-          split_boot;
-          flash_boot;
-          EOF
-          sed -i 's/^          //' AnyKernel3/anykernel.sh
-          # No Android version check (supported.versions empty, like Coconutat's zip):
-          # AnyKernel3 compares it with the *recovery's* Android version, not the ROM's,
-          # so TWRP/OrangeFox builds based on older Android refused the zip.
-          sed -i "s/^kernel.string=.*/& (LineageOS ${LINEAGE_VERSION})/" AnyKernel3/anykernel.sh
+          # Only changes to Coconutat's anykernel.sh: dipper only (this build uses
+          # dipper.config) and the kernel name
+          AK=AnyKernel3/anykernel.sh
+          sed -i -E '/^device\.name[0-9]+=/d' "$AK"
+          sed -i -E 's/^do\.devicecheck=.*/&\ndevice.name1=dipper/' "$AK"
+          if [ "$ROOT" = "bakasu" ]; then NAME="BakaSU (control build)"; else NAME="OriginSU ${ORIGINSU_TAG}"; fi
+          sed -i -E "s|^kernel\.string=.*|kernel.string=Xiaomi Mi 8 (dipper) LineageOS ${LINEAGE_VERSION} kernel with ${NAME} + SuSFS - based on the Coconutat SDM845 kernel|" "$AK"
+          # (no single quote allowed in kernel.string: it sits inside properties() { ' ... ' })
+          [ "$(grep -c "'" "$AK")" = "$(grep -c "'" "$KERNEL_DIR/tools/AnyKernel3_sh/anykernel.sh")" ] \
+            || { echo "::error::anykernel.sh quoting broken"; exit 1; }
+          echo "--- anykernel.sh ---"; sed -n '1,40p' "$AK"
+          grep -q '^device.name1=dipper$' "$AK" || { echo "::error::anykernel.sh: device check not set"; exit 1; }
 
           KREL=$(cat "$KERNEL_DIR/out/include/config/kernel.release" 2>/dev/null)
-          ZIP="Mi8-dipper-LOS${LINEAGE_VERSION}-OriginSU-${ORIGINSU_TAG}-susfs-$(date +%Y%m%d).zip"
+          if [ "$ROOT" = "bakasu" ]; then SU=BakaSU-control; else SU="OriginSU-${ORIGINSU_TAG}"; fi
+          ZIP="Mi8-dipper-LOS${LINEAGE_VERSION}-${SU}-susfs-$(date +%Y%m%d).zip"
           (cd AnyKernel3 && zip -rq9 "../$ZIP" ./*)
           mkdir -p dist
           mv "$ZIP" dist/
@@ -448,7 +438,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Mi8-dipper-OriginSU
+          name: Mi8-dipper-${{ env.ROOT }}
           path: dist/*
 
   # ------------------------------------------------------------------
@@ -458,7 +448,7 @@ jobs:
     needs: [check, build]
     if: >-
       needs.check.outputs.build == 'true' && needs.build.result == 'success' &&
-      (github.event_name == 'schedule' || inputs.publish)
+      (github.event_name == 'schedule' || (inputs.publish && inputs.root != 'bakasu'))
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -472,7 +462,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: Mi8-dipper-OriginSU
+          name: Mi8-dipper-originsu
           path: dist
 
       - name: Write release notes
