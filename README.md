@@ -129,10 +129,10 @@ A manual run for a version that is already released **replaces** that release (u
 
 | Problem | What to do |
 |---|---|
-| Build fails in *Integrate OriginSU* with "hook … absent" | The kernel tree changed its SuSFS hooks — check the Coconutat repo, or pin an older `kernel_branch` |
+| Build fails in *Integrate OriginSU* with "hook … missing" | The kernel tree changed its SuSFS hooks — check the Coconutat repo, or pin an older `kernel_branch` |
 | Build fails with "You lost … hook" / "incompatible hook" | OriginSU expects a newer SuSFS than the tree has — check `build.log` in the run artifacts |
 | Build fails with KPM errors | Re-run manually with `kpm` disabled |
-| *check* fails with "Aucune branche LineageOS avec SuSFS" | The Coconutat tree changed its branch layout — run manually with `kernel_branch` set |
+| *check* fails with "No LineageOS branch with SuSFS found" | The Coconutat tree changed its branch layout — run manually with `kernel_branch` set |
 | No build although OriginSU released | The release has no manager APK yet; the next weekly run will pick it up (or run manually later) |
 | Build fails on a new LineageOS branch | Run manually with `kernel_branch` set to the previous branch until the new one is fixed upstream |
 | Zip refuses to install ("unsupported device" / "unsupported version") | The zip is for `dipper` only, and for the Android version of the LineageOS release it was built for |
