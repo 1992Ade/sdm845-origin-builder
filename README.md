@@ -28,7 +28,7 @@ On top of OriginSU, every build enables the same hardening/usability modules as 
 | **NoMount** | [maxsteeel](https://github.com/maxsteeel/nomount) | Prevents unwanted mounts used for root detection | `CONFIG_NOMOUNT=y` |
 | **Droidspaces** | [ravindu644](https://github.com/ravindu644/Droidspaces-OSS) | Namespace/cgroup isolation to run isolated Android/Linux spaces | `CONFIG_NAMESPACES`, `CONFIG_*_NS`, cgroups, netfilter… |
 
-> **Droidspaces note:** it enables `CONFIG_CFS_BANDWIDTH=y` and applies two non-GKI patches. On this **4.9** tree it is the feature most likely to need adjustment; if a build breaks in the *Extra features* step, Droidspaces is the first suspect. If you use it with a systemd-based Linux space, mask the `NetworkManager` and `wpa_supplicant` services inside that space (as noted upstream).
+> **Droidspaces note:** it enables `CONFIG_CFS_BANDWIDTH=y` and the Droidspaces namespace/cgroup configs. Droidspaces only ships its two "fix" patches for newer trees (the cgroup one targets `kernel/cgroup/cgroup.c`, which exists only since 4.15). On this **4.9** tree the same function and symbols live in `kernel/cgroup.c`, so the build first tries each patch as-is and, if it doesn't apply, retries it with the path rewritten to the 4.9 location — verified to apply cleanly on the Coconutat 4.9 tree. If a future kernel ever changes enough that a patch no longer fits, it is skipped with a `::warning` and the build still completes with the configs enabled. If you use Droidspaces with a systemd-based Linux space, mask the `NetworkManager` and `wpa_supplicant` services inside that space (as noted upstream).
 
 ---
 
@@ -153,7 +153,8 @@ A manual run for a version that is already released **replaces** that release (u
 | Problem | What to do |
 |---|---|
 | Build fails in *Install the root solution* with "hook … missing" | The kernel tree changed its SuSFS hooks — check the Coconutat repo, or pin an older `kernel_branch` |
-| Build fails in *Extra features* | Most likely Droidspaces on 4.9 — check `build-<device>.log` in the run artifacts; the feature can be dropped if it blocks a device |
+| `::warning` about a Droidspaces patch being skipped | Expected on 4.9 — the upstream fix doesn't fit this tree; the build continues with the Droidspaces configs enabled (see the Droidspaces note above) |
+| Build fails in *Extra features* (Baseband Guard / NoMount setup) | Check `build-<device>.log` in the run artifacts; the setup script of one of the modules failed to download or patch the tree |
 | One device fails but others succeed | `fail-fast: false` keeps the rest building; check that device's `build-<device>.log` |
 | Build fails with KPM errors | Re-run manually with `kpm` disabled |
 | *check* fails with "No LineageOS branch with SuSFS found" | The Coconutat tree changed its branch layout — run manually with `kernel_branch` set |
