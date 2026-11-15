@@ -38,16 +38,16 @@ One zip is built per device. **Flash only the zip whose codename matches your ph
 
 | Device | Codename | Test status |
 |---|---|---|
-| Xiaomi Mi 8 | `dipper` | Working |
-| Pocophone F1 / POCO F1 | `beryllium` | 🧪 **Primary — please test** |
-| Xiaomi Mi MIX 2S | `polaris` | 🧪 **Primary — please test** |
+| Xiaomi Mi 8 | `dipper` | ✅ **Working** (tested by the maintainer) |
+| Pocophone F1 / POCO F1 | `beryllium` | 🧪 Primary — please test |
+| Xiaomi Mi MIX 2S | `polaris` | 🧪 Primary — please test |
 | Xiaomi Mi 8 Pro | `equuleus` | ⚠️ Built, untested |
 | Xiaomi Mi MIX 3 | `perseus` | ⚠️ Built, untested |
 | Xiaomi Mi 8 Explorer Edition | `ursa` | ⚠️ Built, untested |
 
-> ### 🧪 Testing needed
-> These builds are produced automatically and have **not all been verified on real hardware**. The three **primary** devices — **`dipper` (Mi 8)**, **`beryllium` (POCO F1)** and **`polaris` (Mi MIX 2S)** — should be tested and confirmed booting before being recommended for daily use. The other three variants (`equuleus`, `perseus`, `ursa`) are built because the Coconutat tree provides their config, but they are completely untested — **back up your stock `boot` and flash at your own risk.**
-> If you test any device, please open an issue reporting whether it boots and whether Wi-Fi / mobile network / camera work.
+> ### 🧪 Testing status
+> **`dipper` (Mi 8)** is tested and confirmed working. The other builds are produced automatically and have **not all been verified on real hardware**: **`beryllium` (POCO F1)** and **`polaris` (Mi MIX 2S)** still need testing, and the remaining variants (`equuleus`, `perseus`, `ursa`) are built because the Coconutat tree provides their config but are completely untested — **back up your stock `boot` and flash at your own risk.**
+> If you test any of the untested devices, please open an issue reporting whether it boots and whether Wi-Fi / mobile network / camera work.
 
 The kernel comes from the LineageOS kernel tree, so it works with ROMs built on the LineageOS `sdm845` 4.9 kernel. Each release states the LineageOS version it was built for (also in the zip name, e.g. `LOS22.2`) — **flash the release that matches the LineageOS / /e/OS version on your phone**. Currently:
 
