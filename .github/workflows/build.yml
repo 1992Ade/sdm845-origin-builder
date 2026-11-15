@@ -424,21 +424,28 @@ jobs:
           echo "== Droidspaces =="
           DROIDSPACES_XT_QTAGUID="https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/refs/heads/main/Documentation/resources/kernel-patches/non-GKI/01.fix_kernel_panic_in_xt_qtaguid.patch"
           DROIDSPACES_CGROUP="https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/refs/heads/main/Documentation/resources/kernel-patches/non-GKI/02.fix_restore%20cgroup%20file%20prefix%20handling%20.patch"
-          # These two upstream "fix" patches are written for newer trees (the cgroup one targets
-          # kernel/cgroup/cgroup.c, which only exists since 4.15; on this 4.9 tree it is
-          # kernel/cgroup.c). Apply them BEST-EFFORT: the kernel still builds with the
-          # Droidspaces configs even when a fix does not apply here. '-t' keeps patch
-          # non-interactive (never prompts "File to patch?").
+          # Droidspaces only ships non-GKI patches for kernel/cgroup/cgroup.c, which exists
+          # only since 4.15. On this 4.9 tree the very same function (cgroup_add_file) and the
+          # symbols the hunk uses (CGRP_ROOT_NOPREFIX, CFTYPE_NO_PREFIX, kernfs_create_link) live
+          # in kernel/cgroup.c. So: try the patch as-is (works on newer trees), and if it does
+          # not apply, retry with the path rewritten to the 4.9 location. Verified to apply
+          # cleanly on Coconutat 4.9. '-t' keeps patch non-interactive (never prompts).
           apply_ds_patch() {
-            local url="$1" desc="$2" f
-            f="$(mktemp)"
-            wget -qO "$f" "$url" || { echo "::warning::Droidspaces: could not download ${desc}"; rm -f "$f"; return 0; }
+            local url="$1" desc="$2" f a
+            f="$(mktemp)"; a="$(mktemp)"
+            wget -qO "$f" "$url" || { echo "::warning::Droidspaces: could not download ${desc}"; rm -f "$f" "$a"; return 0; }
             if patch -p1 --fuzz=5 -t --dry-run < "$f" >/dev/null 2>&1; then
               patch -p1 --fuzz=5 -t < "$f" >/dev/null && echo "-- Droidspaces: applied ${desc}"
             else
-              echo "::warning::Droidspaces: ${desc} does not apply on this 4.9 kernel — skipped (configs still enabled)"
+              # 4.9 fallback: kernel/cgroup/cgroup.c -> kernel/cgroup.c
+              sed 's#kernel/cgroup/cgroup\.c#kernel/cgroup.c#g' "$f" > "$a"
+              if ! cmp -s "$f" "$a" && patch -p1 --fuzz=5 -t --dry-run < "$a" >/dev/null 2>&1; then
+                patch -p1 --fuzz=5 -t < "$a" >/dev/null && echo "-- Droidspaces: applied ${desc} (4.9 path)"
+              else
+                echo "::warning::Droidspaces: ${desc} does not apply on this kernel — skipped (configs still enabled)"
+              fi
             fi
-            rm -f "$f"
+            rm -f "$f" "$a"
           }
           [ -f "net/netfilter/xt_qtaguid.c" ] && apply_ds_patch "$DROIDSPACES_XT_QTAGUID" "xt_qtaguid panic fix"
           apply_ds_patch "$DROIDSPACES_CGROUP" "cgroup prefix fix"
