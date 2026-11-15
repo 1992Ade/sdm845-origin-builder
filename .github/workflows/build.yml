@@ -424,14 +424,24 @@ jobs:
           echo "== Droidspaces =="
           DROIDSPACES_XT_QTAGUID="https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/refs/heads/main/Documentation/resources/kernel-patches/non-GKI/01.fix_kernel_panic_in_xt_qtaguid.patch"
           DROIDSPACES_CGROUP="https://raw.githubusercontent.com/ravindu644/Droidspaces-OSS/refs/heads/main/Documentation/resources/kernel-patches/non-GKI/02.fix_restore%20cgroup%20file%20prefix%20handling%20.patch"
-          if [ -f "net/netfilter/xt_qtaguid.c" ]; then
-            echo "-- applying xt_qtaguid panic fix"
-            wget -qO- "$DROIDSPACES_XT_QTAGUID" | patch -s -p1 --fuzz=5 \
-              || { echo "::error::Droidspaces xt_qtaguid patch failed"; exit 1; }
-          fi
-          echo "-- applying cgroup prefix fix"
-          wget -qO- "$DROIDSPACES_CGROUP" | patch -s -p1 --fuzz=5 \
-            || { echo "::error::Droidspaces cgroup patch failed"; exit 1; }
+          # These two upstream "fix" patches are written for newer trees (the cgroup one targets
+          # kernel/cgroup/cgroup.c, which only exists since 4.15; on this 4.9 tree it is
+          # kernel/cgroup.c). Apply them BEST-EFFORT: the kernel still builds with the
+          # Droidspaces configs even when a fix does not apply here. '-t' keeps patch
+          # non-interactive (never prompts "File to patch?").
+          apply_ds_patch() {
+            local url="$1" desc="$2" f
+            f="$(mktemp)"
+            wget -qO "$f" "$url" || { echo "::warning::Droidspaces: could not download ${desc}"; rm -f "$f"; return 0; }
+            if patch -p1 --fuzz=5 -t --dry-run < "$f" >/dev/null 2>&1; then
+              patch -p1 --fuzz=5 -t < "$f" >/dev/null && echo "-- Droidspaces: applied ${desc}"
+            else
+              echo "::warning::Droidspaces: ${desc} does not apply on this 4.9 kernel — skipped (configs still enabled)"
+            fi
+            rm -f "$f"
+          }
+          [ -f "net/netfilter/xt_qtaguid.c" ] && apply_ds_patch "$DROIDSPACES_XT_QTAGUID" "xt_qtaguid panic fix"
+          apply_ds_patch "$DROIDSPACES_CGROUP" "cgroup prefix fix"
 
           cat >> out/.config <<'EOF'
           CONFIG_SYSCTL=y
