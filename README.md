@@ -38,7 +38,7 @@ One zip is built per device. **Flash only the zip whose codename matches your ph
 
 | Device | Codename | Test status |
 |---|---|---|
-| Xiaomi Mi 8 | `dipper` | 🧪 **Primary — please test** |
+| Xiaomi Mi 8 | `dipper` | Working |
 | Pocophone F1 / POCO F1 | `beryllium` | 🧪 **Primary — please test** |
 | Xiaomi Mi MIX 2S | `polaris` | 🧪 **Primary — please test** |
 | Xiaomi Mi 8 Pro | `equuleus` | ⚠️ Built, untested |
