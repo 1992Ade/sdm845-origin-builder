@@ -106,7 +106,32 @@ jobs:
             echo "Selected kernel branch: $1 (LineageOS $V)"
           }
 
+          # Same file/hook list as the "Install the root solution" step: a branch is only
+          # usable if it has SuSFS, the shared configs AND every inline hook OriginSU needs.
+          # Read through the authenticated API (raw.githubusercontent.com can fail/rate-limit).
+          getf() { gh api -H "Accept: application/vnd.github.raw" "repos/$R/contents/$1?ref=$2" 2>/dev/null; }
+          usable() {
+            local b=$1 f p c
+            for f in fs/susfs.c include/linux/susfs.h \
+                     arch/arm64/configs/vendor/xiaomi/mi845_defconfig \
+                     arch/arm64/configs/vendor/xiaomi/extra.config; do
+              gh api "repos/$R/contents/$f?ref=$b" -q .name >/dev/null 2>&1 || { echo "  $b: $f missing"; return 1; }
+            done
+            for p in "kernel/sys.c:ksu_handle_setresuid" "fs/exec.c:ksu_handle_execveat" \
+                     "fs/open.c:ksu_handle_faccessat" "fs/read_write.c:ksu_handle_sys_read" \
+                     "fs/stat.c:ksu_handle_stat" "kernel/reboot.c:ksu_handle_sys_reboot" \
+                     "drivers/input/input.c:ksu_handle_input_handle_event"; do
+              c=""
+              for _ in 1 2 3; do c=$(getf "${p%%:*}" "$b") && [ -n "$c" ] && break; sleep 5; done
+              [ -n "$c" ] || { echo "::warning::$b: could not read ${p%%:*}"; return 1; }
+              grep -q "${p#*:}" <<<"$c" || { echo "  $b: hook ${p#*:} missing from ${p%%:*}"; return 1; }
+            done
+            echo "  $b: SuSFS + all hooks OK"
+          }
+
           if [ -n "${{ inputs.kernel_branch }}" ]; then
+            usable "${{ inputs.kernel_branch }}" \
+              || { echo "::error::Branch ${{ inputs.kernel_branch }} lacks SuSFS or a required hook (see above)"; exit 1; }
             pick "${{ inputs.kernel_branch }}"; exit 0
           fi
 
@@ -123,18 +148,9 @@ jobs:
                       echo "$(gh api "repos/$R/commits/$b" -q .commit.committer.date) $b"
                     done | sort -r | cut -d' ' -f2)
             for b in $CANDS; do
-              ok=1
-              # Needs SuSFS + its hooks + the shared SDM845 configs used by the build
+              # Needs SuSFS + every hook + the shared SDM845 configs used by the build
               # (per-device <codename>.config is checked later, in each build matrix leg)
-              for f in fs/susfs.c include/linux/susfs.h \
-                       arch/arm64/configs/vendor/xiaomi/mi845_defconfig \
-                       arch/arm64/configs/vendor/xiaomi/extra.config; do
-                gh api "repos/$R/contents/$f?ref=$b" -q .name >/dev/null 2>&1 || { echo "  $b: $f missing"; ok=0; break; }
-              done
-              if [ $ok = 1 ] && ! curl -fsSL "https://raw.githubusercontent.com/$R/$b/fs/exec.c" | grep -q 'ksu_handle_execveat'; then
-                echo "  $b: SuSFS hooks missing"; ok=0
-              fi
-              if [ $ok = 1 ]; then pick "$b"; exit 0; fi
+              if usable "$b"; then pick "$b"; exit 0; fi
             done
           done
           echo "::error::No LineageOS branch with SuSFS found in $R"; exit 1
