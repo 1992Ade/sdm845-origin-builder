@@ -374,7 +374,7 @@ jobs:
           grep -E '^(CONFIG_KSU|CONFIG_KPM)' out/.config || true
           grep -q '^CONFIG_KSU_SUSFS=y' out/.config || { echo "::error::CONFIG_KSU_SUSFS is not enabled"; exit 1; }
 
-      - name: Extra features — Baseband Guard, NoMount, Droidspaces
+      - name: Extra features — Baseband Guard, NoMount, Droidspaces, TCP BBR
         working-directory: ${{ env.KERNEL_DIR }}
         # Same three features as riarumoda/perf_neon-builder scripts/goodies/*, adapted to this
         # builder (config lives in out/.config, enabled via scripts/config + olddefconfig).
@@ -534,6 +534,10 @@ jobs:
           CONFIG_NETFILTER_NETLINK_QUEUE=y
           CONFIG_NETFILTER_NETLINK_LOG=y
           CONFIG_NETFILTER_XT_TARGET_NFLOG=y
+          CONFIG_TCP_CONG_ADVANCED=y
+          CONFIG_TCP_CONG_BBR=y
+          CONFIG_DEFAULT_BBR=y
+          CONFIG_NET_SCH_FQ=y
           EOF
           sed -i 's/^[[:space:]]*CONFIG_/CONFIG_/' out/.config
 
@@ -541,7 +545,8 @@ jobs:
           $MK olddefconfig
 
           echo "--- Extra-feature configs effectively enabled ---"
-          grep -E '^CONFIG_(BBG|NOMOUNT|NAMESPACES|USER_NS|OVERLAY_FS)=' out/.config || true
+          grep -E '^CONFIG_(BBG|NOMOUNT|NAMESPACES|USER_NS|OVERLAY_FS|TCP_CONG_BBR|DEFAULT_BBR|NET_SCH_FQ)=|^CONFIG_DEFAULT_TCP_CONG=' out/.config || true
+          grep -q '^CONFIG_DEFAULT_TCP_CONG="bbr"' out/.config || { echo "::error::TCP BBR is not the default congestion control"; exit 1; }
 
       - name: Compile the kernel
         working-directory: ${{ env.KERNEL_DIR }}
@@ -683,7 +688,7 @@ jobs:
           | Kernel | Coconutat SDM845 \`${KERNEL_BRANCH}\` @ [\`${KERNEL_COMMIT}\`](https://github.com/${KERNEL_REPO}/commit/${KERNEL_COMMIT}) |
           | Kernel version | \`${KERNEL_RELEASE}\` |
           | SuSFS | \`${SUSFS_VERSION}\` (inline hook) |
-          | Extra features | Baseband Guard · NoMount · Droidspaces |
+          | Extra features | Baseband Guard · NoMount · Droidspaces · TCP BBR (default) |
           | Build date | $(date -u +%Y-%m-%d) |
 
           ### Which zip for my device?
