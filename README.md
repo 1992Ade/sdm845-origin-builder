@@ -9,7 +9,7 @@
 
 This repository automates the compilation of a custom **Linux 4.9** kernel for **Xiaomi Snapdragon 845 (SDM845)** devices — Mi 8, POCO F1, Mi MIX 2S and their siblings. It is based on the LineageOS-derived kernel tree by **[Coconutat](https://github.com/Coconutat/android_kernel_xiaomi_sdm845_lineageos_Exp)**, which already ships **SuSFS** and its inline hooks (originally used with BakaSU).
 
-Every build integrates the **[OriginSU](https://github.com/samakshkambxj/OriginSU)** kernel-based root solution in place of BakaSU — together with **SuSFS**, **Baseband Guard**, **NoMount** and **Droidspaces** (see [Included features](#-included-features)) — and produces **one recovery-flashable `.zip` per device** (TWRP / OrangeFox) with AnyKernel3.
+Every build integrates the **[OriginSU](https://github.com/samakshkambxj/OriginSU)** kernel-based root solution in place of BakaSU — together with **SuSFS**, **Baseband Guard**, **NoMount**, **Droidspaces** and **TCP BBR** (see [Included features](#-included-features)) — and produces **one recovery-flashable `.zip` per device** (TWRP / OrangeFox) with AnyKernel3.
 
 **Fully automated:** a GitHub Actions workflow checks every week (Sunday) for a new OriginSU release. As soon as a new version is out **with its manager APK**, the kernel is rebuilt for every device with that exact OriginSU version and a new GitHub Release is published automatically — no manual action needed.
 
@@ -27,8 +27,11 @@ On top of OriginSU, every build enables the same hardening/usability modules as 
 | **Baseband Guard** | [vc-teahouse](https://github.com/vc-teahouse/Baseband-guard) | LSM that blocks writes to the modem/baseband partitions | `CONFIG_BBG=y` |
 | **NoMount** | [maxsteeel](https://github.com/maxsteeel/nomount) | Prevents unwanted mounts used for root detection | `CONFIG_NOMOUNT=y` |
 | **Droidspaces** | [ravindu644](https://github.com/ravindu644/Droidspaces-OSS) | Namespace/cgroup isolation to run isolated Android/Linux spaces | `CONFIG_NAMESPACES`, `CONFIG_*_NS`, cgroups, netfilter… |
+| **TCP BBR** | [Google](https://github.com/google/bbr) (mainline since 4.9) | BBR congestion control, built in and **set as default** (the stock Coconutat kernel uses CUBIC); `fq` qdisc built in too | `CONFIG_TCP_CONG_BBR=y`, `CONFIG_DEFAULT_BBR=y`, `CONFIG_NET_SCH_FQ=y` |
 
 > **Droidspaces note:** it enables `CONFIG_CFS_BANDWIDTH=y` and the Droidspaces namespace/cgroup configs. Droidspaces only ships its two "fix" patches for newer trees (the cgroup one targets `kernel/cgroup/cgroup.c`, which exists only since 4.15). On this **4.9** tree the same function and symbols live in `kernel/cgroup.c`, so the build first tries each patch as-is and, if it doesn't apply, retries it with the path rewritten to the 4.9 location — verified to apply cleanly on the Coconutat 4.9 tree. If a future kernel ever changes enough that a patch no longer fits, it is skipped with a `::warning` and the build still completes with the configs enabled. If you use Droidspaces with a systemd-based Linux space, mask the `NetworkManager` and `wpa_supplicant` services inside that space (as noted upstream).
+
+> **TCP BBR note:** check it with `cat /proc/sys/net/ipv4/tcp_congestion_control` (root shell) — it should print `bbr`. On 4.9, BBR paces its traffic through the `fq` qdisc (TCP-internal pacing only arrived in 4.13), and 4.9 has no config option to make `fq` the default qdisc. BBR works without it, but works best with `net.core.default_qdisc=fq` set at boot (e.g. a `service.d` script).
 
 ---
 
@@ -112,7 +115,7 @@ check  ──►  build (matrix: 6 devices)  ──►  release
    - Clones the selected Coconutat SDM845 kernel branch.
    - Downloads **AOSP Clang r547379**, the toolchain recommended by the kernel's author.
    - Integrates OriginSU at the exact release tag with its official `setup.sh` (plus small 4.9 compatibility fixes applied to OriginSU's sources only), then checks that every SuSFS inline hook OriginSU needs is in the tree.
-   - Generates the config from `vendor/xiaomi/mi845_defconfig` + `extra.config` + `<device>.config`, then enables the **extra features** (Baseband Guard, NoMount, Droidspaces — see [above](#-included-features)).
+   - Generates the config from `vendor/xiaomi/mi845_defconfig` + `extra.config` + `<device>.config`, then enables the **extra features** (Baseband Guard, NoMount, Droidspaces, TCP BBR as default — see [above](#-included-features)).
    - Packages like Coconutat: osm0sis AnyKernel3 + the tree's own `tools/AnyKernel3_sh/anykernel.sh`, with both `Image.gz` and `Image.gz-dtb`. AnyKernel3 flashes `Image.gz` and **keeps the DTB of your ROM's `boot.img`**. Each zip installs on its own device only.
 3. **release** — publishes a GitHub Release `originsu-<tag>` with every device zip, the configs and release notes (OriginSU version, LineageOS version, kernel branch and commit, kernel version, SuSFS version, the per-device zip table and the build date).
 
