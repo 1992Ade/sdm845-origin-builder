@@ -10,8 +10,10 @@ name: Build Xiaomi SDM845 Kernels with OriginSU
 #
 # OriginSU is discontinued: the project became KazeSU (https://github.com/KazeSU/KazeSU).
 # This builder is frozen on the last OriginSU release, v4.3.0, kept in the KazeSU repository
-# (tag v4.3.0, GitHub release "legacy-v4.3.0"). No scheduled builds any more: run it manually
-# to pick up kernel updates. KazeSU kernels: https://github.com/1992Ade/sdm845-KazeSU-builder
+# (tag v4.3.0, GitHub release "legacy-v4.3.0"). KazeSU v1.x does not build on this 4.9 tree (its
+# SELinux code needs the 5.10+ struct selinux_state; 4.9 has no struct selinux_state at all), so
+# OriginSU v4.3.0 stays the recommended root. 4.9 is the newest kernel LineageOS ships for SDM845.
+# Manual runs only.
 
 on:
   workflow_dispatch:
@@ -431,6 +433,13 @@ jobs:
           curl -LSs --fail --retry 3 -H "Authorization: Bearer $GITHUB_TOKEN" "$NOMOUNT_SETUP_URI" | bash -s "$NOMOUNT_SETUP_BRANCH" \
             || { echo "::error::NoMount setup failed"; exit 1; }
           ./scripts/config --file out/.config -e NOMOUNT
+          # OriginSU v4.3.0 drives NoMount itself (OriginMount screen -> "nomount" mode): ksud
+          # probes the built-in driver first and needs driver API >= 22 (NoMount v2.2.0+). v2.3.0
+          # reports API 23 with the same wire structures. Do not install the NoMount module zip on top.
+          NM_API="$(sed -n 's/^#define NOMOUNT_BASE_VERSION "\([0-9]*\)".*/\1/p' fs/nomount/nomount.h)"
+          echo "-- NoMount driver API: ${NM_API:-unknown}"
+          [ -n "$NM_API" ] && [ "$NM_API" -ge 22 ] \
+            || { echo "::error::NoMount API ${NM_API:-unknown} < 22: OriginSU v4.3.0 would refuse the driver"; exit 1; }
 
           ########## 3) Droidspaces (ravindu644) ##########
           echo "== Droidspaces =="
@@ -545,7 +554,41 @@ jobs:
           PY
           fi
 
+          ########## 5) Optimizations (low risk, missing from the Coconutat config) ##########
+          echo "== Optimizations =="
+          # 5a) vm.swappiness up to 200 (4.9 caps it at 100). The reclaim math already uses
+          #     file_prio = 200 - anon_prio, so 200 is valid: it lets userspace prefer swapping
+          #     to ZRAM over dropping file cache. The value set by the ROM (100) is unchanged.
+          if grep -q 'static int two_hundred = 200;' kernel/sysctl.c; then
+            echo "-- swappiness: already patched"
+          elif grep -q 'file_prio = 200 - anon_prio;' mm/vmscan.c \
+               && awk '/\.procname[[:space:]]*=[[:space:]]*"swappiness"/{f=1} f&&/\.extra2/{print; exit}' kernel/sysctl.c | grep -q '&one_hundred'; then
+            sed -i 's/^static int one_hundred = 100;$/&\nstatic int two_hundred = 200;/' kernel/sysctl.c
+            sed -i '/\.procname[[:space:]]*=[[:space:]]*"swappiness"/,/}/ s/\.extra2\([[:space:]]*\)=[[:space:]]*&one_hundred/.extra2\1= \&two_hundred/' kernel/sysctl.c
+            awk '/\.procname[[:space:]]*=[[:space:]]*"swappiness"/{f=1} f&&/\.extra2/{print; exit}' kernel/sysctl.c | grep -q '&two_hundred' \
+              && echo "-- swappiness max = 200" || { echo "::error::swappiness patch did not apply"; exit 1; }
+          else
+            echo "::warning::swappiness patch skipped (kernel/sysctl.c or mm/vmscan.c changed upstream)"
+          fi
+          # 5b) Tune code generation for the cores (4x Cortex-A75 + 4x Cortex-A55, all ARMv8.2).
+          #     Clang has no big.LITTLE -mcpu pair: tune for the A55 like most SDM845 kernels.
+          if grep -q -- '-mcpu=' Makefile arch/arm64/Makefile; then
+            echo "-- -mcpu already set"
+          else
+            sed -i '0,/export KBUILD_CFLAGS/s//KBUILD_CFLAGS += -mcpu=cortex-a55\n&/' Makefile
+            grep -q -- '-mcpu=cortex-a55' Makefile && echo "-- KBUILD_CFLAGS += -mcpu=cortex-a55" \
+              || { echo "::error::-mcpu patch did not apply"; exit 1; }
+          fi
+          # 5c) Configs: power-efficient workqueues, lz4 + zstd available for ZRAM (lzo stays the
+          #     default), TTL / HL targets for tethering (appended below with the other configs).
+
           cat >> out/.config <<'EOF'
+          CONFIG_WQ_POWER_EFFICIENT_DEFAULT=y
+          CONFIG_CRYPTO_LZ4=y
+          CONFIG_CRYPTO_ZSTD=y
+          CONFIG_IP_NF_TARGET_TTL=y
+          CONFIG_IP6_NF_TARGET_HL=y
+          CONFIG_NETFILTER_XT_TARGET_HL=y
           CONFIG_SYSCTL=y
           CONFIG_SYSVIPC=y
           CONFIG_POSIX_MQUEUE=y
@@ -647,6 +690,13 @@ jobs:
           grep -E '^CONFIG_(BBG|NOMOUNT|NAMESPACES|USER_NS|OVERLAY_FS|TCP_CONG_BBR|DEFAULT_BBR|NET_SCH_FQ|NET_SCH_DEFAULT|DEFAULT_FQ)=|^CONFIG_DEFAULT_(TCP_CONG|NET_SCH)=' out/.config || true
           grep -q '^CONFIG_DEFAULT_TCP_CONG="bbr"' out/.config || { echo "::error::TCP BBR is not the default congestion control"; exit 1; }
           grep -q '^CONFIG_DEFAULT_NET_SCH="fq"' out/.config  || { echo "::error::fq is not the default qdisc (BBR needs fq pacing on 4.9)"; exit 1; }
+          echo "--- Optimizations ---"
+          # (CONFIG_CFS_BANDWIDTH, asked for by Droidspaces above, cannot stick on this tree: it
+          #  depends on !SCHED_WALT and Qualcomm's WALT scheduler is on. Droidspaces' --cpus limit is
+          #  therefore unavailable here; memory/swap limits (MEMCG) work.)
+          for k in CONFIG_WQ_POWER_EFFICIENT_DEFAULT=y CONFIG_CRYPTO_LZ4=y CONFIG_CRYPTO_ZSTD=y CONFIG_IP_NF_TARGET_TTL=y CONFIG_IP6_NF_TARGET_HL=y CONFIG_MEMCG=y; do
+            grep -qxF "$k" out/.config && echo "  $k" || { echo "::error::$k missing from the final config"; exit 1; }
+          done
 
       - name: Compile the kernel
         working-directory: ${{ env.KERNEL_DIR }}
@@ -759,6 +809,16 @@ jobs:
           merge-multiple: true
           path: dist
 
+      - name: Fetch the OriginSU manager APK
+        # Same tag as the kernel (KazeSU/KazeSU release "legacy-<tag>"); arm64-v8a only.
+        run: |
+          gh release download "$ORIGINSU_TAG" --repo KazeSU/KazeSU \
+            --pattern 'OriginSU_*-arm64-v8a-release.apk' --dir dist
+          APK="$(ls dist/OriginSU_*-arm64-v8a-release.apk 2>/dev/null | head -n1)"
+          [ -n "$APK" ] || { echo "::error::OriginSU manager APK not found in KazeSU/KazeSU release $ORIGINSU_TAG"; exit 1; }
+          echo "MANAGER_APK=$(basename "$APK")" >> "$GITHUB_ENV"
+          echo "-> $(basename "$APK") ($(du -h "$APK" | cut -f1))"
+
       - name: Write release notes
         run: |
           source "$(ls dist/info-*.txt | head -1)"
@@ -788,7 +848,9 @@ jobs:
           | Kernel | Coconutat SDM845 \`${KERNEL_BRANCH}\` @ [\`${KERNEL_COMMIT}\`](https://github.com/${KERNEL_REPO}/commit/${KERNEL_COMMIT}) |
           | Kernel version | \`${KERNEL_RELEASE}\` |
           | SuSFS | \`${SUSFS_VERSION}\` (inline hook) |
-          | Extra features | Baseband Guard · NoMount · Droidspaces · TCP BBR + fq (default) |
+          | Extra features | Baseband Guard · NoMount · Droidspaces (with memory limits) · TCP BBR + fq (default) |
+          | Optimizations | power-efficient workqueues · lz4/zstd for ZRAM · TTL/HL targets · \`vm.swappiness\` up to 200 · Cortex-A55 tuning |
+          | Manager | \`${MANAGER_APK}\` (attached) |
           | Build date | $(date -u +%Y-%m-%d) |
 
           ### Which zip for my device?
@@ -801,12 +863,19 @@ jobs:
           > maintainer tests on **beryllium (POCO F1)**, **dipper (Mi 8)** and **polaris (Mi MIX 2S)**;
           > the other variants are untested — back up your stock \`boot\` and test before daily use.
 
-          Flash from TWRP / OrangeFox, then install the OriginSU manager from the
-          [legacy-${ORIGINSU_TAG} release page](https://github.com/KazeSU/KazeSU/releases/tag/${ORIGINSU_TAG})
-          (OriginSU manager, not the KazeSU v1.x one).
+          Flash from TWRP / OrangeFox, then install the attached **OriginSU manager**
+          (\`${MANAGER_APK}\`, same version as the kernel — not the KazeSU v1.x manager).
           **Back up your stock \`boot\` partition first.**
 
-          > This is the last OriginSU kernel. Future kernels: [sdm845-KazeSU-builder](https://github.com/1992Ade/sdm845-KazeSU-builder).
+          ### Modules — pick a mount mode
+          OriginSU mounts modules itself: open the manager's **OriginMount** screen and pick a mode.
+          In \`auto\` (default) nothing is mounted unless a metamodule is installed or Magic Mount is enabled.
+          **NoMount** is built into this kernel (no real mounts, nothing in \`/proc/mounts\`): choose \`nomount\`
+          and do not install the separate NoMount module zip.
+
+          > **Why OriginSU and not KazeSU?** KazeSU v1.x does not build on this Linux 4.9 kernel (its SELinux
+          > code needs 5.10+), and 4.9 is the newest kernel LineageOS ships for SDM845. OriginSU \`${ORIGINSU_TAG}\`
+          > stays the recommended root here.
           EOF
           sed -i 's/^          //' notes.md
 
@@ -816,4 +885,4 @@ jobs:
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
             --title "Xiaomi SDM845 LineageOS ${LINEAGE_VERSION} — OriginSU ${ORIGINSU_TAG}" \
             --notes-file notes.md --latest \
-            dist/*.zip dist/config-*.txt
+            dist/*.zip dist/config-*.txt dist/*.apk
