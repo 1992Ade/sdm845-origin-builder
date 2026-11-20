@@ -570,6 +570,19 @@ jobs:
           else
             echo "::warning::swappiness patch skipped (kernel/sysctl.c or mm/vmscan.c changed upstream)"
           fi
+          # 5a') Same limit for memory cgroups: LineageOS' init.qcom.rc writes 140 to
+          #      /sys/fs/cgroup/memory/bg/memory.swappiness (background apps swap to ZRAM sooner),
+          #      but this 4.9 kernel rejects values above 100, so the ROM's setting never applied.
+          #      Per-memcg reclaim uses the same file_prio = 200 - anon_prio math as the global one.
+          if awk '/^static int mem_cgroup_swappiness_write/{f=1} f&&/if \(val > 200\)/{print; exit}' mm/memcontrol.c | grep -q .; then
+            echo "-- memcg swappiness: already patched"
+          elif awk '/^static int mem_cgroup_swappiness_write/{f=1} f&&/if \(val > 100\)/{print; exit}' mm/memcontrol.c | grep -q .; then
+            sed -i '/^static int mem_cgroup_swappiness_write/,/^}/ s/if (val > 100)/if (val > 200)/' mm/memcontrol.c
+            awk '/^static int mem_cgroup_swappiness_write/{f=1} f&&/if \(val > 200\)/{print; exit}' mm/memcontrol.c | grep -q . \
+              && echo "-- memcg swappiness max = 200" || { echo "::error::memcg swappiness patch did not apply"; exit 1; }
+          else
+            echo "::warning::memcg swappiness patch skipped (mm/memcontrol.c changed upstream)"
+          fi
           # 5b) Tune code generation for the cores (4x Cortex-A75 + 4x Cortex-A55, all ARMv8.2).
           #     Clang has no big.LITTLE -mcpu pair: tune for the A55 like most SDM845 kernels.
           if grep -q -- '-mcpu=' Makefile arch/arm64/Makefile; then
@@ -579,8 +592,21 @@ jobs:
             grep -q -- '-mcpu=cortex-a55' Makefile && echo "-- KBUILD_CFLAGS += -mcpu=cortex-a55" \
               || { echo "::error::-mcpu patch did not apply"; exit 1; }
           fi
-          # 5c) Configs: power-efficient workqueues, lz4 + zstd available for ZRAM (lzo stays the
-          #     default), TTL / HL targets for tethering (appended below with the other configs).
+          # 5c) ZRAM: lz4 instead of lzo by default. The ROM never sets comp_algorithm, so the
+          #     kernel default applies, and on this 4.9 tree it is hard-coded to "lzo". lz4 is much
+          #     faster (above all to read pages back from ZRAM) for a slightly lower ratio, which
+          #     does not matter with 6-8 GB of RAM. zstd stays available. CONFIG_CRYPTO_LZ4 is
+          #     enabled below and checked in the final config: without it zram could not start.
+          if grep -q '^static const char \*default_compressor = "lz4";' drivers/block/zram/zram_drv.c; then
+            echo "-- zram: lz4 already the default"
+          elif grep -q '^static const char \*default_compressor = "lzo";' drivers/block/zram/zram_drv.c; then
+            sed -i 's/^static const char \*default_compressor = "lzo";/static const char *default_compressor = "lz4";/' drivers/block/zram/zram_drv.c
+            echo "-- zram: default compressor lzo -> lz4"
+          else
+            echo "::error::zram default_compressor not found in drivers/block/zram/zram_drv.c"; exit 1
+          fi
+          # 5d) Configs: power-efficient workqueues, lz4 (default, see 5c) + zstd for ZRAM,
+          #     TTL / HL targets for tethering (appended below with the other configs).
 
           cat >> out/.config <<'EOF'
           CONFIG_WQ_POWER_EFFICIENT_DEFAULT=y
@@ -849,7 +875,7 @@ jobs:
           | Kernel version | \`${KERNEL_RELEASE}\` |
           | SuSFS | \`${SUSFS_VERSION}\` (inline hook) |
           | Extra features | Baseband Guard · NoMount · Droidspaces (with memory limits) · TCP BBR + fq (default) |
-          | Optimizations | power-efficient workqueues · lz4/zstd for ZRAM · TTL/HL targets · \`vm.swappiness\` up to 200 · Cortex-A55 tuning |
+          | Optimizations | ZRAM in lz4 by default (was lzo; zstd available) · power-efficient workqueues · TTL/HL targets · \`vm.swappiness\` and per-cgroup swappiness up to 200 (the ROM's 140 for background apps now applies) · Cortex-A55 tuning |
           | Manager | \`${MANAGER_APK}\` (attached) |
           | Build date | $(date -u +%Y-%m-%d) |
 
