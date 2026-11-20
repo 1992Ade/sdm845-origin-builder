@@ -3,17 +3,26 @@
 [![Build](https://img.shields.io/badge/build-GitHub%20Actions-blue?logo=github-actions&logoColor=white)](https://github.com/1992Ade/sdm845-origin-builder/actions/workflows/build.yml)
 [![Latest release](https://img.shields.io/github/v/release/1992Ade/sdm845-origin-builder?label=latest&logo=github)](https://github.com/1992Ade/sdm845-origin-builder/releases/latest)
 
+> [!IMPORTANT]
+> **This is the last OriginSU kernel — development continues with KazeSU.**
+> OriginSU has been renamed and rebuilt as **[KazeSU](https://github.com/KazeSU/KazeSU)**, so `v4.3.0` is the final OriginSU release and this builder is frozen on it (no automatic builds; it is only re-run by hand to pick up kernel updates).
+> **All future kernels will be published in the new repository: [sdm845-KazeSU-builder](https://github.com/1992Ade/sdm845-KazeSU-builder).**
+>
+> The OriginSU `v4.3.0` code and manager remain available in the KazeSU repository ([tag `v4.3.0`, release "legacy-v4.3.0"](https://github.com/KazeSU/KazeSU/releases/tag/v4.3.0)). Keep using these OriginSU builds until KazeSU kernels are available for SDM845, or if you need SuSFS features that KazeSU does not have.
+
 > **Your warranty is now void.** Flashing a custom kernel can brick your device. You are responsible for what you flash. Always keep a backup of your stock `boot` partition.
 
 ## 📱 About This Repository
 
 This repository automates the compilation of a custom **Linux 4.9** kernel for **Xiaomi Snapdragon 845 (SDM845)** devices — Mi 8, POCO F1, Mi MIX 2S and their siblings. It is based on the LineageOS-derived kernel tree by **[Coconutat](https://github.com/Coconutat/android_kernel_xiaomi_sdm845_lineageos_Exp)**, which already ships **SuSFS** and its inline hooks (originally used with BakaSU).
 
-Every build integrates the **[OriginSU](https://github.com/samakshkambxj/OriginSU)** kernel-based root solution in place of BakaSU — together with **SuSFS**, **Baseband Guard**, **NoMount**, **Droidspaces** and **TCP BBR** (see [Included features](#-included-features)) — and produces **one recovery-flashable `.zip` per device** (TWRP / OrangeFox) with AnyKernel3.
+Every build integrates the **[OriginSU v4.3.0](https://github.com/KazeSU/KazeSU/releases/tag/v4.3.0)** kernel-based root solution in place of BakaSU — together with **SuSFS**, **Baseband Guard**, **NoMount**, **Droidspaces** and **TCP BBR** (see [Included features](#-included-features)) — and produces **one recovery-flashable `.zip` per device** (TWRP / OrangeFox) with AnyKernel3.
 
-**Fully automated:** a GitHub Actions workflow checks every week (Sunday) for a new OriginSU release. As soon as a new version is out **with its manager APK**, the kernel is rebuilt for every device with that exact OriginSU version and a new GitHub Release is published automatically — no manual action needed.
+The XDA thread text (BBCode, ready to paste) is kept in [`docs/XDA_POST.txt`](docs/XDA_POST.txt).
 
-**Always the latest LineageOS:** each run picks the most recent LineageOS version available in the Coconutat tree (today `lineage-22.2-BakaSU`, LineageOS 22.2 / Android 15). When a newer LineageOS branch with SuSFS appears (e.g. LineageOS 23 / Android 16), the next weekly run switches to it on its own and rebuilds the current release.
+**Manual builds only:** OriginSU will not get new releases, so the weekly check was removed; new versions come from [sdm845-KazeSU-builder](https://github.com/1992Ade/sdm845-KazeSU-builder). Running the workflow by hand rebuilds OriginSU `v4.3.0` for every device on the latest kernel and replaces the release.
+
+**Always the latest LineageOS:** each run picks the most recent LineageOS version available in the Coconutat tree (today `lineage-22.2-BakaSU`, LineageOS 22.2 / Android 15). When a newer LineageOS branch with SuSFS appears (e.g. LineageOS 23 / Android 16), the next manual run switches to it on its own.
 
 ---
 
@@ -27,11 +36,18 @@ On top of OriginSU, every build enables the same hardening/usability modules as 
 | **Baseband Guard** | [vc-teahouse](https://github.com/vc-teahouse/Baseband-guard) | LSM that blocks writes to the modem/baseband partitions | `CONFIG_BBG=y` |
 | **NoMount** | [maxsteeel](https://github.com/maxsteeel/nomount) | Prevents unwanted mounts used for root detection | `CONFIG_NOMOUNT=y` |
 | **Droidspaces** | [ravindu644](https://github.com/ravindu644/Droidspaces-OSS) | Namespace/cgroup isolation to run isolated Android/Linux spaces | `CONFIG_NAMESPACES`, `CONFIG_*_NS`, cgroups, netfilter… |
-| **TCP BBR** | [Google](https://github.com/google/bbr) (mainline since 4.9) | BBR congestion control, built in and **set as default** (the stock Coconutat kernel uses CUBIC); `fq` qdisc built in too | `CONFIG_TCP_CONG_BBR=y`, `CONFIG_DEFAULT_BBR=y`, `CONFIG_NET_SCH_FQ=y` |
+| **TCP BBR + fq** | [Google](https://github.com/google/bbr) (mainline since 4.9) | BBR congestion control **set as default** (the stock Coconutat kernel uses CUBIC), with the **`fq` qdisc as default** so BBR can pace its traffic | `CONFIG_DEFAULT_BBR=y`, `CONFIG_NET_SCH_FQ=y`, `CONFIG_DEFAULT_FQ=y` |
 
 > **Droidspaces note:** it enables `CONFIG_CFS_BANDWIDTH=y` and the Droidspaces namespace/cgroup configs. Droidspaces only ships its two "fix" patches for newer trees (the cgroup one targets `kernel/cgroup/cgroup.c`, which exists only since 4.15). On this **4.9** tree the same function and symbols live in `kernel/cgroup.c`, so the build first tries each patch as-is and, if it doesn't apply, retries it with the path rewritten to the 4.9 location — verified to apply cleanly on the Coconutat 4.9 tree. If a future kernel ever changes enough that a patch no longer fits, it is skipped with a `::warning` and the build still completes with the configs enabled. If you use Droidspaces with a systemd-based Linux space, mask the `NetworkManager` and `wpa_supplicant` services inside that space (as noted upstream).
 
-> **TCP BBR note:** check it with `cat /proc/sys/net/ipv4/tcp_congestion_control` (root shell) — it should print `bbr`. On 4.9, BBR paces its traffic through the `fq` qdisc (TCP-internal pacing only arrived in 4.13), and 4.9 has no config option to make `fq` the default qdisc. BBR works without it, but works best with `net.core.default_qdisc=fq` set at boot (e.g. a `service.d` script).
+> **TCP BBR note:** on 4.9, BBR has no TCP-internal pacing (it only arrived in 4.13): the kernel's own `tcp_bbr.c` states that BBR **must** run on the `fq` qdisc, otherwise it does not work properly. This 4.9 tree had no config option to make `fq` the default qdisc, so the build **backports the small upstream change** that adds it (`CONFIG_NET_SCH_DEFAULT` + a boot-time call to the existing `qdisc_set_default()`, identical to mainline) and selects `fq`. No `service.d` script is needed any more. The build fails if the final `.config` does not have `CONFIG_DEFAULT_TCP_CONG="bbr"` and `CONFIG_DEFAULT_NET_SCH="fq"`.
+>
+> Check on the phone (root shell):
+> ```sh
+> cat /proc/sys/net/ipv4/tcp_congestion_control   # bbr
+> cat /proc/sys/net/core/default_qdisc            # fq
+> tc qdisc show dev wlan0                          # fq on Wi-Fi (if tc is available)
+> ```
 
 ---
 
@@ -73,7 +89,7 @@ Each release ships **one zip per device**, named:
 sdm845-<codename>-LOS<lineage>-OriginSU-<version>-susfs-<date>.zip
 ```
 
-For example `sdm845-dipper-LOS22.2-OriginSU-v1.2.3-susfs-20261115.zip` for the Mi 8. Only the **SuSFS** variant is built: the Coconutat tree has its KernelSU hooks written for SuSFS. The full kernel `.config` of each device is attached to the release for reference.
+For example `sdm845-dipper-LOS22.2-OriginSU-v4.3.0-susfs-20261115.zip` for the Mi 8. Only the **SuSFS** variant is built: the Coconutat tree has its KernelSU hooks written for SuSFS. The full kernel `.config` of each device is attached to the release for reference.
 
 ---
 
@@ -84,7 +100,7 @@ For example `sdm845-dipper-LOS22.2-OriginSU-v1.2.3-susfs-20261115.zip` for the M
 2. Download **the zip matching your device codename** from the [latest release](https://github.com/1992Ade/sdm845-origin-builder/releases/latest).
 3. Reboot to recovery and flash it, or use `adb sideload <file>.zip`.
 4. Reboot to system.
-5. Install the **OriginSU manager** APK (`arm64-v8a` or `universal`) from the OriginSU release linked in the release notes — it is always the same version as the kernel.
+5. Install the **OriginSU manager** APK (`arm64-v8a` or `universal`) from the [legacy-v4.3.0 release](https://github.com/KazeSU/KazeSU/releases/tag/v4.3.0) — same version as the kernel. Do **not** install the KazeSU v1.x manager with this kernel.
 
 > **Updating the ROM?** A LineageOS / /e/OS OTA update replaces the `boot` partition, so the OriginSU kernel is removed. Flash the zip again after each ROM update.
 
@@ -108,14 +124,13 @@ check  ──►  build (matrix: 6 devices)  ──►  release
 ```
 
 1. **check**
-   - Reads the latest stable OriginSU release and makes sure it ships the **manager APK** (otherwise nothing is built, and the next weekly run tries again).
+   - Selects the OriginSU tag (`v4.3.0` by default; only `v4.x` OriginSU tags are accepted) and makes sure its release ships the **manager APK**.
    - Picks the kernel branch: among the `lineage-<version>[-suffix]` branches of the Coconutat tree, the highest LineageOS version first, and for the same version the most recently updated branch. A branch is kept only if it contains SuSFS, its inline hooks and the shared SDM845 configs.
-   - Builds if there is no `originsu-<tag>` release yet, or if the existing one was built on an older LineageOS branch. Otherwise the run stops there.
 2. **build** (matrix: `beryllium`, `dipper`, `equuleus`, `polaris`, `perseus`, `ursa` — in parallel, `fail-fast: false`)
    - Clones the selected Coconutat SDM845 kernel branch.
    - Downloads **AOSP Clang r547379**, the toolchain recommended by the kernel's author.
-   - Integrates OriginSU at the exact release tag with its official `setup.sh` (plus small 4.9 compatibility fixes applied to OriginSU's sources only), then checks that every SuSFS inline hook OriginSU needs is in the tree.
-   - Generates the config from `vendor/xiaomi/mi845_defconfig` + `extra.config` + `<device>.config`, then enables the **extra features** (Baseband Guard, NoMount, Droidspaces, TCP BBR as default — see [above](#-included-features)).
+   - Integrates OriginSU at the exact tag with its own `setup.sh` from that tag, cloned from the KazeSU repository (the build stops if the tag cannot be checked out) (plus small 4.9 compatibility fixes applied to OriginSU's sources only), then checks that every SuSFS inline hook OriginSU needs is in the tree.
+   - Generates the config from `vendor/xiaomi/mi845_defconfig` + `extra.config` + `<device>.config`, then enables the **extra features** (Baseband Guard, NoMount, Droidspaces, TCP BBR + `fq` as default — see [above](#-included-features)).
    - Packages like Coconutat: osm0sis AnyKernel3 + the tree's own `tools/AnyKernel3_sh/anykernel.sh`, with both `Image.gz` and `Image.gz-dtb`. AnyKernel3 flashes `Image.gz` and **keeps the DTB of your ROM's `boot.img`**. Each zip installs on its own device only.
 3. **release** — publishes a GitHub Release `originsu-<tag>` with every device zip, the configs and release notes (OriginSU version, LineageOS version, kernel branch and commit, kernel version, SuSFS version, the per-device zip table and the build date).
 
@@ -123,8 +138,9 @@ check  ──►  build (matrix: 6 devices)  ──►  release
 
 | Trigger | Behaviour |
 |---|---|
-| Every Sunday at 05:37 UTC | Builds **only** if a new OriginSU release (with its manager) is out, or a newer LineageOS branch appeared |
-| Manual (`Run workflow`) | Always builds; you can pick an OriginSU tag, a kernel branch, toggle KPM and choose whether to publish a release |
+| Manual (`Run workflow`) | Builds OriginSU `v4.3.0` (or another `v4.x` tag); you can pick a kernel branch, toggle KPM and choose whether to publish a release |
+
+There is no scheduled build any more (OriginSU is discontinued).
 
 A manual run for a version that is already released **replaces** that release (useful to pick up kernel updates). A `bakasu` manual run builds the untouched Coconutat kernel (no extra features) as a control.
 
@@ -134,16 +150,13 @@ A manual run for a version that is already released **replaces** that release (u
 
 1. Fork the repository.
 2. Go to **Settings → Actions → General** and make sure Actions are enabled and **Workflow permissions** allow *Read and write* (needed to publish releases).
-3. In the **Actions** tab, enable scheduled workflows on the fork.
-4. Run **Build Xiaomi SDM845 Kernels with OriginSU** once manually to create the first release.
-
-> GitHub disables scheduled workflows after **60 days without repository activity**. If automatic releases stop, re-enable the workflow in the Actions tab or push a commit.
+3. Run **Build Xiaomi SDM845 Kernels with OriginSU** once manually to create the first release.
 
 ### Manual run options
 
 | Input | Default | Description |
 |---|---|---|
-| `originsu_ref` | *(latest release)* | OriginSU tag to build |
+| `originsu_ref` | `v4.3.0` | OriginSU tag to build (`v4.x` only) |
 | `kernel_branch` | *(latest LineageOS with SuSFS)* | Force a branch of the Coconutat kernel tree (e.g. `lineage-22.2-ReSukiSU`) |
 | `root` | `originsu` | `bakasu` builds the untouched Coconutat kernel (BakaSU) as a **control build**, with no extra features. Never published |
 | `kpm` | `false` | Enable `CONFIG_KPM` (experimental on 4.9 kernels) |
@@ -161,12 +174,11 @@ A manual run for a version that is already released **replaces** that release (u
 | One device fails but others succeed | `fail-fast: false` keeps the rest building; check that device's `build-<device>.log` |
 | Build fails with KPM errors | Re-run manually with `kpm` disabled |
 | *check* fails with "No LineageOS branch with SuSFS found" | The Coconutat tree changed its branch layout — run manually with `kernel_branch` set |
-| No build although OriginSU released | The release has no manager APK yet; the next weekly run will pick it up (or run manually later) |
 | Zip refuses to install ("unsupported device") | You flashed the wrong device's zip — pick the one whose codename matches your phone, and make sure your ROM matches the LineageOS version of the release |
 | Device stuck on boot logo, or reboots straight to fastboot | Restore the stock `boot.img`. The last kernel log is kept in RAM: boot into TWRP right away and get `/sys/fs/pstore/console-ramoops-0` (e.g. `adb pull /sys/fs/pstore/`), then open an issue with it |
 | Boots, but no Wi-Fi / mobile network / camera | Almost always a module conflict — see [Coming from another root solution?](#️-coming-from-another-root-solution) below |
 | Root gone after a ROM update | Normal: OTA updates replace `boot`. Flash the zip again |
-| No new release after an OriginSU update | Check that the scheduled workflow is still enabled (60-day rule above) |
+| Build fails with "fq is not the default qdisc" | The `NET_SCH_DEFAULT` backport no longer applies to the kernel tree — check the *TCP BBR + fq* lines of the *Extra features* step |
 
 ### ⚠️ Coming from another root solution?
 
@@ -211,7 +223,7 @@ This project relies on the incredible work of the following open-source projects
 * **[Coconutat](https://github.com/Coconutat/android_kernel_xiaomi_sdm845_lineageos_Exp)** — For the Xiaomi SDM845 LineageOS kernel tree with SuSFS already integrated (`lineage-*` branches).
 * **[LineageOS](https://github.com/LineageOS/android_kernel_xiaomi_sdm845)** — For the original Xiaomi SDM845 kernel source and device support.
 * **[/e/OS](https://e.foundation/)** — For the de-Googled Android 15 builds.
-* **[OriginSU](https://github.com/samakshkambxj/OriginSU)** — For the kernel-based root solution.
+* **[OriginSU](https://github.com/KazeSU/KazeSU/releases/tag/v4.3.0)** (now [KazeSU](https://github.com/KazeSU/KazeSU)) — For the kernel-based root solution.
 * **[riarumoda](https://github.com/riarumoda/perf_neon-builder)** — For perf_neon-builder, whose feature integration (Baseband Guard, NoMount, Droidspaces) this build reuses.
 * **[osm0sis](https://github.com/osm0sis/AnyKernel3)** — For AnyKernel3.
 * **[simonpunk](https://gitlab.com/simonpunk/susfs4ksu)** — For SuSFS.
