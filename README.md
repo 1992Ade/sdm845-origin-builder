@@ -19,7 +19,7 @@ This repository automates the compilation of a custom **Linux 4.9** kernel for *
 Every build integrates the **[OriginSU v4.3.0](https://github.com/KazeSU/KazeSU/releases/tag/v4.3.0)** kernel-based root solution in place of BakaSU — together with **SuSFS**, **Baseband Guard**, **NoMount**, **Droidspaces**, **TCP BBR** and a few [optimizations](#-optimizations) (see [Included features](#-included-features)) — and produces **one recovery-flashable `.zip` per device** (TWRP / OrangeFox) with AnyKernel3. The matching **OriginSU manager APK** is attached to each release.
 
 > [!WARNING]
-> **LineageOS-based ROMs only.** This is a LineageOS kernel. Kernels for LineageOS (and ROMs built on it, such as /e/OS) and kernels for other ROM families such as crDroid are **not interchangeable** on SDM845: one does not boot on the other. Check that your ROM uses the LineageOS `sdm845` kernel before flashing.
+> **LineageOS-based ROMs only.** This is a LineageOS kernel. Kernels for LineageOS (and ROMs built on it, such as /e/OS) and kernels for other ROM families such as crDroid are **not interchangeable** on SDM845: one may not boot on the other. Check that your ROM uses the LineageOS `sdm845` kernel before flashing.
 
 **Manual builds only:** OriginSU will not get new releases, so the weekly check was removed. Running the workflow by hand rebuilds OriginSU `v4.3.0` for every device on the latest kernel, with the current optimizations, and replaces the release.
 
