@@ -1,7 +1,7 @@
 name: Build Xiaomi SDM845 Kernels with OriginSU
 
 # Based on Coconutat's SDM845 4.9 kernel (android_kernel_xiaomi_sdm845_lineageos_Exp),
-# which already ships SuSFS v2.x and the SuSFS inline hooks. The branch is picked
+# which already ships SuSFS v2.3.0 and the SuSFS inline hooks (updated here to v2.4.0). The branch is picked
 # automatically: the most recent LineageOS version whose branch contains SuSFS
 # (currently lineage-22.2-BakaSU).
 # BakaSU (fetched by sync_ksu.sh, not part of the tree) is replaced by OriginSU.
@@ -31,6 +31,11 @@ on:
         type: choice
         options: [originsu, bakasu]
         default: originsu
+      susfs:
+        description: "SuSFS: v2.4.0 (JackA1ltman's 4.9 port, pinned) or tree (the tree's v2.3.0)"
+        type: choice
+        options: [v2.4.0, tree]
+        default: v2.4.0
       kpm:
         description: "Enable CONFIG_KPM (experimental on 4.9)"
         type: boolean
@@ -56,6 +61,12 @@ env:
   KERNEL_DIR: android_kernel_xiaomi_sdm845
   # Toolchain used by Coconutat (see the kernel's README)
   CLANG_URL: https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/android16-release/clang-r547379.tar.gz
+  # SuSFS 4.9 port by JackA1ltman (NonGKI_Kernel_Build_2nd, Patches/Patch/susfs_patch_to_4.9.patch).
+  # BASE = the commit the Coconutat tree was built from (v2.3.0, identical fs/susfs.c);
+  # PORT = the v2.4.0 commit used here. Pinned so that a later change of the port cannot break builds.
+  SUSFS_PORT_REPO: JackA1ltman/NonGKI_Kernel_Build_2nd
+  SUSFS_BASE_REF: 732feefc0d4132bc313d39d7a511b9b7bbe51ddb
+  SUSFS_PORT_REF: 26f2313be61f7a8603a50b2dcd12171495a79d27
   KBUILD_BUILD_USER: builder
   KBUILD_BUILD_HOST: github-actions
 
@@ -196,6 +207,7 @@ jobs:
       ANDROID_VERSION: ${{ needs.check.outputs.android }}
       ROOT: ${{ github.event_name == 'workflow_dispatch' && inputs.root || 'originsu' }}
       KPM: ${{ github.event_name == 'workflow_dispatch' && inputs.kpm || 'false' }}
+      SUSFS: ${{ github.event_name == 'workflow_dispatch' && inputs.susfs || 'v2.4.0' }}
       # Environment exported by build_kernel.sh
       ARCH: arm64
       SUBARCH: arm64
@@ -364,6 +376,182 @@ jobs:
           done
           [ -f fs/susfs.c ] || { echo "::error::SuSFS missing from the tree"; exit 1; }
           echo "Tree SuSFS: $(grep -m1 SUSFS_VERSION include/linux/susfs.h)"
+
+          # --- SuSFS v2.3.0 (tree) -> v2.4.0 (JackA1ltman's 4.9 port) ---
+          # The tree carries that port at SUSFS_BASE_REF. Between it and SUSFS_PORT_REF only
+          # fs/susfs.c, include/linux/susfs{,_def}.h, fs/Makefile, fs/namei.c and fs/readdir.c
+          # change; every other SuSFS hook is identical. The script replaces the three SuSFS files,
+          # reverts the old hunks of the other changed files and applies the new ones, and stops
+          # if the tree is not exactly the expected base. susfs=tree keeps the tree's version.
+          if [ "$SUSFS" = "tree" ]; then
+            echo "SuSFS: keeping the tree's version (input susfs=tree)"
+          else
+            P="https://raw.githubusercontent.com/${SUSFS_PORT_REPO}"
+            curl -fLSs --retry 3 -o /tmp/susfs_base.patch "$P/$SUSFS_BASE_REF/Patches/Patch/susfs_patch_to_4.9.patch"
+            curl -fLSs --retry 3 -o /tmp/susfs_new.patch "$P/$SUSFS_PORT_REF/Patches/Patch/susfs_patch_to_4.9.patch"
+            cat > /tmp/susfs_update.py <<'PY'
+          #!/usr/bin/env python3
+          # Move the tree's SuSFS from one JackA1ltman 4.9 port to a newer one.
+          #   usage: susfs_update.py <base.patch> <new.patch>   (run from the kernel tree)
+          # base.patch = the port the tree was built from, new.patch = the port to move to.
+          # - new files (fs/susfs.c, include/linux/susfs*.h): the tree must hold exactly the base
+          #   version (otherwise stop), then the new version is written;
+          # - files whose hunks are identical in both ports: left alone;
+          # - files whose hunks changed: the base hunks are reverted, then the new ones applied.
+          import os, subprocess, sys
+
+          def split(path):
+              files, cur = {}, None
+              for line in open(path, errors="surrogateescape").read().split("\n"):
+                  if line.startswith("diff --git "):
+                      cur = line.split()[3][2:]
+                      files[cur] = []
+                  if cur is not None:
+                      files[cur].append(line)
+              return {k: "\n".join(v) + "\n" for k, v in files.items()}
+
+          def changes(section):
+              return [l for l in section.split("\n")
+                      if l[:1] in "+-" and not l.startswith(("+++", "---"))]
+
+          def is_new(section):
+              return "\nnew file mode" in section or "\n--- /dev/null" in section
+
+          def new_content(section):
+              out, body = [], False
+              for l in section.split("\n"):
+                  if l.startswith("@@"):
+                      body = True
+                      continue
+                  if body and l.startswith("+"):
+                      out.append(l[1:])
+              return "\n".join(out) + "\n"
+
+          def run_patch(section, reverse):
+              args = ["patch", "-p1", "--no-backup-if-mismatch", "-r", "-", "-s"]
+              if reverse:
+                  args.append("-R")
+              for dry in (True, False):
+                  r = subprocess.run(args + (["--dry-run"] if dry else []), input=section,
+                                     text=True, capture_output=True, errors="surrogateescape")
+                  if r.returncode:
+                      return r.stdout + r.stderr
+              return None
+
+          def version(text):
+              for l in text.split("\n"):
+                  if l.startswith("#define SUSFS_VERSION"):
+                      return l.split('"')[1]
+              return "?"
+
+          base, new = split(sys.argv[1]), split(sys.argv[2])
+          if set(base) != set(new):
+              print("::warning::file lists differ: only in base %s, only in new %s"
+                    % (sorted(set(base) - set(new)), sorted(set(new) - set(base))))
+
+          tree_ver = version(open("include/linux/susfs.h").read())
+          base_ver = version(new_content(base["include/linux/susfs.h"]))
+          new_ver = version(new_content(new["include/linux/susfs.h"]))
+          print("SuSFS: tree %s, base port %s, new port %s" % (tree_ver, base_ver, new_ver))
+          if tree_ver == new_ver:
+              print("-- tree already at %s, nothing to do" % new_ver)
+              sys.exit(0)
+
+          errors = []
+          # 1) check everything before touching anything
+          for f in sorted(set(base) | set(new)):
+              b, n = base.get(f, ""), new.get(f, "")
+              if changes(b) == changes(n):
+                  continue
+              if is_new(b) or is_new(n):
+                  if b and (not os.path.exists(f) or open(f, errors="surrogateescape").read() != new_content(b)):
+                      errors.append("%s: the tree's copy is not the one of the base port" % f)
+              elif f not in base or f not in new:
+                  errors.append("%s: only in one port" % f)
+              else:
+                  r = subprocess.run(["patch", "-p1", "-R", "--dry-run", "-s", "-r", "-"], input=b,
+                                     text=True, capture_output=True, errors="surrogateescape")
+                  if r.returncode:
+                      errors.append("%s: the base port hunks do not revert cleanly\n%s" % (f, r.stdout + r.stderr))
+          if errors:
+              for e in errors:
+                  print("::error::" + e)
+              print("::error::the tree's SuSFS is not the expected base port: update SUSFS_BASE_REF")
+              sys.exit(1)
+
+          # 2) apply
+          for f in sorted(set(base) | set(new)):
+              b, n = base.get(f, ""), new.get(f, "")
+              if changes(b) == changes(n):
+                  continue
+              if is_new(n):
+                  os.makedirs(os.path.dirname(f) or ".", exist_ok=True)
+                  open(f, "w", errors="surrogateescape").write(new_content(n))
+                  print("-- %s replaced (%d lines)" % (f, new_content(n).count("\n")))
+                  continue
+              err = run_patch(b, reverse=True)
+              if err:
+                  print("::error::%s: could not revert the base port hunks\n%s" % (f, err))
+                  sys.exit(1)
+              err = run_patch(n, reverse=False)
+              if err:
+                  print("::error::%s: could not apply the new port hunks\n%s" % (f, err))
+                  sys.exit(1)
+              print("-- %s updated (hunks of the new port)" % f)
+
+          got = version(open("include/linux/susfs.h").read())
+          if got != new_ver:
+              print("::error::SuSFS version after update is %s, expected %s" % (got, new_ver))
+              sys.exit(1)
+          print("-- SuSFS %s -> %s" % (tree_ver, got))
+
+          PY
+            python3 /tmp/susfs_update.py /tmp/susfs_base.patch /tmp/susfs_new.patch
+            # Port bug: SUSFS_LOGI_RL/SUSFS_LOGE_RL are only defined when CONFIG_KSU_SUSFS_ENABLE_LOG
+            # is on (it is off here) -> "implicit declaration of function 'SUSFS_LOGI_RL'".
+            if grep -q 'SUSFS_LOG[IE]_RL(' fs/susfs.c && ! grep -qE '^#define SUSFS_LOGI_RL\(fmt, \.\.\.\)[[:space:]]*$' fs/susfs.c; then
+              sed -i -E '0,/^#define SUSFS_LOGE\(fmt, \.\.\.\)[[:space:]]*$/s//&\n#define SUSFS_LOGI_RL(fmt, ...)\n#define SUSFS_LOGE_RL(fmt, ...)/' fs/susfs.c
+              grep -qE '^#define SUSFS_LOGI_RL\(fmt, \.\.\.\)[[:space:]]*$' fs/susfs.c \
+                && echo "-- fs/susfs.c: empty SUSFS_LOG*_RL added for builds without SuSFS logging" \
+                || { echo "::error::could not add the SUSFS_LOG*_RL fallbacks"; exit 1; }
+            fi
+            echo "SuSFS now: $(grep -m1 SUSFS_VERSION include/linux/susfs.h)"
+          fi
+
+          # OriginSU v4.3.0 predates SuSFS v2.4.0: wire its one new command, the sus_path uid
+          # filter (CMD_SUSFS_SET_SUS_PATH_UID_FILTER = apps allowed to see the hidden paths),
+          # and re-resolve those apps' uids whenever packages.list is rewritten (install/update),
+          # as the uid of a reinstalled app changes.
+          if grep -q 'CMD_SUSFS_SET_SUS_PATH_UID_FILTER' include/linux/susfs_def.h; then
+            python3 - <<'PY'
+          import re, sys
+          f = "KernelSU/kernel/supercall/dispatch.c"
+          s = open(f).read()
+          if "CMD_SUSFS_SET_SUS_PATH_UID_FILTER" not in s:
+              a = "        susfs_add_sus_path_loop(arg);\n        return 0;\n    }\n"
+              if s.count(a) != 1:
+                  sys.exit("::error::OriginSU dispatch.c: CMD_SUSFS_ADD_SUS_PATH_LOOP case not found")
+              s = s.replace(a, a + "    case CMD_SUSFS_SET_SUS_PATH_UID_FILTER: {\n"
+                                   "        susfs_set_sus_path_uid_filter(arg);\n"
+                                   "        return 0;\n    }\n")
+              open(f, "w").write(s)
+              print("-> OriginSU: CMD_SUSFS_SET_SUS_PATH_UID_FILTER wired")
+          f = "KernelSU/kernel/manager/throne_tracker.c"
+          s = open(f).read()
+          if "susfs_parse_sus_path_app_strings" not in s:
+              a = "    track_throne(TRACK_THRONE_FROM_RENAMEAT | TRACK_THRONE_FORCE_SYNCHRONOUS);\n"
+              if s.count(a) != 1:
+                  sys.exit("::error::OriginSU throne_tracker.c: packages.list rename hook not found")
+              s = s.replace(a, a + "#ifdef CONFIG_KSU_SUSFS_SUS_PATH\n"
+                                   "    {\n"
+                                   "        extern void susfs_parse_sus_path_app_strings(void);\n"
+                                   "        susfs_parse_sus_path_app_strings();\n"
+                                   "    }\n"
+                                   "#endif\n")
+              open(f, "w").write(s)
+              print("-> OriginSU: sus_path uid filter refreshed on packages.list updates")
+          PY
+          fi
           sed -i 's/\$(KSU_COMMIT_SHA)-dirty/$(KSU_COMMIT_SHA)/' KernelSU/kernel/Kbuild 2>/dev/null || true
 
       - name: Generate kernel config
@@ -585,12 +773,19 @@ jobs:
           fi
           # 5b) Tune code generation for the cores (4x Cortex-A75 + 4x Cortex-A55, all ARMv8.2).
           #     Clang has no big.LITTLE -mcpu pair: tune for the A55 like most SDM845 kernels.
+          #     The flag goes right after `KBUILD_CFLAGS += $(CLANG_FLAGS)`, i.e. once --target is in
+          #     the flags: earlier, the Makefile's cc-option probes (run with KBUILD_CFLAGS) would see
+          #     -mcpu=cortex-a55 without --target, fail on the host target and silently drop their
+          #     option - that is how -Wno-misleading-indentation got lost and fts_521 broke -Werror.
           if grep -q -- '-mcpu=' Makefile arch/arm64/Makefile; then
             echo "-- -mcpu already set"
-          else
-            sed -i '0,/export KBUILD_CFLAGS/s//KBUILD_CFLAGS += -mcpu=cortex-a55\n&/' Makefile
-            grep -q -- '-mcpu=cortex-a55' Makefile && echo "-- KBUILD_CFLAGS += -mcpu=cortex-a55" \
+          elif grep -qE '^KBUILD_CFLAGS[[:space:]]*\+=[[:space:]]*\$\(CLANG_FLAGS\)[[:space:]]*$' Makefile; then
+            sed -i -E '0,/^KBUILD_CFLAGS[[:space:]]*\+=[[:space:]]*\$\(CLANG_FLAGS\)[[:space:]]*$/s//&\nKBUILD_CFLAGS\t+= -mcpu=cortex-a55/' Makefile
+            grep -A1 -E '^KBUILD_CFLAGS[[:space:]]*\+=[[:space:]]*\$\(CLANG_FLAGS\)' Makefile | grep -q -- '-mcpu=cortex-a55' \
+              && echo "-- KBUILD_CFLAGS += -mcpu=cortex-a55 (after CLANG_FLAGS)" \
               || { echo "::error::-mcpu patch did not apply"; exit 1; }
+          else
+            echo "::warning::-mcpu skipped (no 'KBUILD_CFLAGS += \$(CLANG_FLAGS)' line in the Makefile)"
           fi
           # 5c) ZRAM: lz4 instead of lzo by default. The ROM never sets comp_algorithm, so the
           #     kernel default applies, and on this 4.9 tree it is hard-coded to "lzo". lz4 is much
@@ -873,7 +1068,7 @@ jobs:
           | ROM | LineageOS ${LINEAGE_VERSION} (Android ${ANDROID_VERSION}) and /e/OS based on it |
           | Kernel | Coconutat SDM845 \`${KERNEL_BRANCH}\` @ [\`${KERNEL_COMMIT}\`](https://github.com/${KERNEL_REPO}/commit/${KERNEL_COMMIT}) |
           | Kernel version | \`${KERNEL_RELEASE}\` |
-          | SuSFS | \`${SUSFS_VERSION}\` (inline hook) |
+          | SuSFS | \`${SUSFS_VERSION}\` (inline hook; v2.4.0 = JackA1ltman's 4.9 port, the tree ships v2.3.0) |
           | Extra features | Baseband Guard · NoMount · Droidspaces (with memory limits) · TCP BBR + fq (default) |
           | Optimizations | ZRAM in lz4 by default (was lzo; zstd available) · power-efficient workqueues · TTL/HL targets · \`vm.swappiness\` and per-cgroup swappiness up to 200 (the ROM's 140 for background apps now applies) · Cortex-A55 tuning |
           | Manager | \`${MANAGER_APK}\` (attached) |
