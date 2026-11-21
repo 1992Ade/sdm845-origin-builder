@@ -21,7 +21,6 @@ Every build integrates the **[OriginSU v4.3.0](https://github.com/KazeSU/KazeSU/
 > [!WARNING]
 > **LineageOS-based ROMs only.** This is a LineageOS kernel. Kernels for LineageOS (and ROMs built on it, such as /e/OS) and kernels for other ROM families such as crDroid are **not interchangeable** on SDM845: one does not boot on the other. Check that your ROM uses the LineageOS `sdm845` kernel before flashing.
 
-The XDA thread text (BBCode, ready to paste) is kept in [`docs/XDA_POST.txt`](docs/XDA_POST.txt).
 
 **Manual builds only:** OriginSU will not get new releases, so the weekly check was removed. Running the workflow by hand rebuilds OriginSU `v4.3.0` for every device on the latest kernel, with the current optimizations, and replaces the release.
 
@@ -63,7 +62,7 @@ The Coconutat kernel already has WireGuard, PSI and memory cgroups. This builder
 | **ZRAM in lz4 by default** (was `lzo`) + `CONFIG_CRYPTO_ZSTD=y` | The ROM does not choose a ZRAM algorithm, so the kernel default applies; it was hard-coded to the old `lzo`. **lz4** is much faster, above all to bring apps back from ZRAM, for a slightly lower compression ratio that does not matter with 6–8 GB of RAM. zstd (better compression, more CPU) stays available | `cat /sys/block/zram0/comp_algorithm` → `[lz4]` |
 | `CONFIG_IP_NF_TARGET_TTL=y`, `CONFIG_IP6_NF_TARGET_HL=y` | iptables `TTL` / `HL` targets, e.g. to hide tethering from the carrier | `iptables -t mangle -A POSTROUTING -j TTL --ttl-set 64` |
 | `vm.swappiness` max 100 → 200 | Lets you make the kernel prefer swapping to ZRAM over dropping app caches. The ROM's value (100) is unchanged | `echo 160 > /proc/sys/vm/swappiness` |
-| Per-cgroup swappiness max 100 → 200 | LineageOS' `init.qcom.rc` creates a `bg` memory cgroup and sets its swappiness to **140**, so apps placed there swap to ZRAM sooner than foreground apps. The 4.9 kernel rejected any value above 100, so that ROM setting silently never applied; now it does. If your build does not create that group or leaves it empty, this changes nothing (harmless either way) | `cat /sys/fs/cgroup/memory/bg/memory.swappiness` → `140` |
+| Per-cgroup swappiness max 100 → 200 | The 4.9 kernel refused memory-cgroup swappiness values above 100 (newer kernels allow 200). Now a module or a manual tweak can set e.g. 150 on a group in `/dev/memcg`. The ROM itself sets none: LineageOS' `init.qcom.rc` tries to give a `bg` group swappiness 140, but that group is never created on LineageOS 22 (memcg lives in `/dev/memcg`), so nothing changes by default | `mkdir /dev/memcg/t; echo 150 > /dev/memcg/t/memory.swappiness; cat /dev/memcg/t/memory.swappiness; rmdir /dev/memcg/t` → `150` |
 | `-mcpu=cortex-a55` | Code tuned for the cores of the Snapdragon 845 (Cortex-A75 + Cortex-A55, ARMv8.2) | — |
 
 Not included on purpose: LTO (experimental on this 4.9 tree, and it can rename internal symbols that root/hiding code looks up at boot), MGLRU (too large to backport to 4.9) and a newer LZ4 (its new decompression loop was measured slower on in-order Cortex-A53 cores and with Clang).
@@ -147,8 +146,6 @@ uname -r                                              # 4.9.x
 cat /proc/sys/net/ipv4/tcp_congestion_control         # bbr
 cat /proc/sys/net/core/default_qdisc                  # fq
 cat /sys/block/zram0/comp_algorithm                   # [lz4] lzo ... zstd
-cat /sys/fs/cgroup/memory/bg/memory.swappiness        # 140 if the ROM created the group (100 = rejected)
-wc -l < /sys/fs/cgroup/memory/bg/tasks                # > 0 = background apps are in that group
 cat /proc/net/ip_tables_targets | grep TTL            # TTL
 cat /proc/net/ip6_tables_targets | grep HL            # HL
 cat /sys/module/workqueue/parameters/power_efficient  # Y
